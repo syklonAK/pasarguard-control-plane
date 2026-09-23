@@ -76,7 +76,7 @@ services:
     restart: unless-stopped
     build: .
     env_file: .env
-    command: ["python", "-m", "control_plane.telegram_consumer"]
+    command: ["python", "-m", "control_plane.telegram_consumer_v07"]
     depends_on:
       postgres:
         condition: service_healthy
