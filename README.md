@@ -1,49 +1,46 @@
 # PasarGuard B2B Control Plane
 
-سامانه سازمانی فروش عمده، مدیریت نماینده و زیرشاخه برای PasarGuard با کیف پول، دفترکل مالی، محاسبه مصرف، Telegram Bot و Telegram WebApp.
+Enterprise wholesale and reseller management for PasarGuard with usage billing, recursive reseller accounts, encrypted server credentials, Telegram Bot and Telegram WebApp.
 
-> این پروژه ترافیک VPN را عبور نمی‌دهد. کاربران مستقیماً به نودهای PasarGuard/Xray متصل می‌شوند؛ Control Plane فقط مدیریت و حسابداری را انجام می‌دهد.
+## Product flow
 
-## امکانات
+1. Install the infrastructure with one command.
+2. Open the Telegram bot and tap **Open Panel**.
+3. Enter the one-time setup token shown after installation.
+4. Register PasarGuard servers from **WebApp → Servers**.
+5. Manage resellers, nodes, credit and billing from the WebApp. Server registration is not performed in the Linux terminal.
 
-- ساختار نامحدود والد/فرزند برای نمایندگان
-- تعرفه مستقل در هر رابطه والد و فرزند
-- کیف پول، سقف اعتبار و دفترکل دوطرفه Append-only
-- صورتحساب بر اساس `lifetime_used_traffic`
-- تسویه آبشاری سود تمام سطوح
-- اتصال هر نمایندگی به Admin پاسارگارد
-- Billing Worker گروه‌بندی‌شده به تفکیک پنل
-- Telegram Gateway و صف Redis
-- WebApp انگلیسی و موبایل‌محور
-- PostgreSQL، Redis، Nginx و HTTPS خودکار Caddy
+## One-command installation
 
-## نصب تک‌کامندی
-
-پیش‌نیاز: Ubuntu/Debian، حداقل 2 هسته CPU (پیشنهاد Production: چهار هسته یا بیشتر)، 8GB RAM، دامنه و Token ربات.
+Requirements: Ubuntu 22.04/24.04 or Debian 12, a domain pointing to the server, ports 80/443, and a Telegram bot token.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/main/install.sh | sudo bash
 ```
 
-بعد از نصب:
+All installer prompts and messages are in English. Existing `.env` secrets are preserved when the installer is rerun.
+
+## First-time WebApp setup
+
+After installation, open the bot and tap **Open Panel**. Read the one-time token with:
 
 ```bash
-sudo bash /opt/pasarguard-control-plane/scripts/bootstrap.sh
+sudo grep INITIAL_SETUP_TOKEN /root/pasarguard-control-plane-credentials.txt
 ```
 
-## بروزرسانی با یک فایل
+Use the WebApp onboarding screen to create the root business. Then add PasarGuard panels from **Servers → Add server**. API keys and owner credentials are encrypted before database storage.
 
-بعد از نصب اولیه، برای دریافت و اعمال نسخه جدید فقط اجرا کنید:
+## Updates
+
+Do not reinstall. Run the local updater:
 
 ```bash
 sudo bash /opt/pasarguard-control-plane/update.sh
 ```
 
-Updater تنظیمات `.env` را حفظ می‌کند، نسخه جدید را دریافت می‌کند، سرویس‌ها را مجدد می‌سازد و Health Check انجام می‌دهد.
+It preserves `.env`, pulls the latest release, validates Compose, rebuilds changed services, runs tracked database migrations, checks the internal API and refreshes Telegram configuration.
 
-## رفع خطای CPU روی سرور دو هسته‌ای
-
-اگر نصب قبلی هنگام ساخت Container متوقف شده، این دستورها را یک‌بار اجرا کنید:
+## Recover a previously interrupted installation
 
 ```bash
 cd /opt/pasarguard-control-plane
@@ -51,7 +48,7 @@ git pull --ff-only
 sudo bash update.sh
 ```
 
-## دستورات نگهداری
+## Operations
 
 ```bash
 sudo bash /opt/pasarguard-control-plane/scripts/doctor.sh
@@ -59,4 +56,6 @@ sudo bash /opt/pasarguard-control-plane/scripts/backup.sh
 sudo bash /opt/pasarguard-control-plane/update.sh
 ```
 
-> پیش از ورود پول واقعی، تست بار، بازیابی Backup، Failover، MFA/RBAC، Approval عملیات حساس و Reconciliation مالی را آزمایش کنید.
+## Capacity
+
+Defaults are safe for a 2-vCPU pilot server. A real 10,000-user production deployment requires staged load tests and larger PostgreSQL/API capacity. Before accepting real money, complete backup-restore drills, reconciliation, MFA/RBAC and approval workflows.
