@@ -9,7 +9,7 @@ dependencies=["fastapi>=0.115,<1","uvicorn[standard]>=0.32,<1","sqlalchemy>=2,<3
 [tool.setuptools.packages.find]
 where=["src"]
 [project.optional-dependencies]
-test=["pytest>=8,<9","fakeredis>=2.24,<3","pgserver>=0.1,<0.2"]
+test=["pytest>=8,<9","pgserver>=0.1,<0.2; sys_platform=='win32'"]
 [tool.pytest.ini_options]
 pythonpath=["src"]
 testpaths=["tests"]

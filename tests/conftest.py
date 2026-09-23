@@ -15,6 +15,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _database_url() -> str:
+    # CI points this at a real PostgreSQL service container; pgserver only ships Windows binaries.
+    supplied = os.environ.get("PYTEST_DATABASE_URL")
+    if supplied:
+        return supplied if "+" in supplied else supplied.replace("postgresql://", "postgresql+psycopg://")
+
     import pgserver
 
     data_dir = ROOT.parent / ".pgdata-control-plane-test"

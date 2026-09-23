@@ -19,12 +19,22 @@ jobs:
   test:
     needs: static
     runs-on: ubuntu-latest
+    services:
+      # The embedded pgserver used locally ships Windows binaries only, so CI talks to a
+      # real PostgreSQL: the same migrations, triggers and row locks are exercised.
+      postgres:
+        image: postgres:17-alpine
+        env: {POSTGRES_DB: control, POSTGRES_USER: control, POSTGRES_PASSWORD: control}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U control -d control"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      PYTEST_DATABASE_URL: postgresql+psycopg://control:control@localhost:5432/control
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
-      # The suite runs against an embedded PostgreSQL, so migrations and ledger triggers
-      # are proven on the same SQL behavior production gets.
       - run: python -m pip install --upgrade pip
       - run: pip install -e .[test]
       - run: pytest -q
