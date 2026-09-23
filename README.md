@@ -9,9 +9,10 @@
 
 [![CI](https://github.com/syklonAK/pasarguard-control-plane/actions/workflows/quality.yml/badge.svg)](https://github.com/syklonAK/pasarguard-control-plane/actions/workflows/quality.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-d9741f)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791)
-![Redis](https://img.shields.io/badge/Redis-7-dc382c)
+![Redis](https://img.shields.io/badge/Redis-7.4-dc382c)
 ![UI](https://img.shields.io/badge/وب%E2%80%8Cاپ-فارسی%20RTL-6c5ce7)
 
 </div>
@@ -54,7 +55,7 @@ Telegram ──webhook──▶ telegram-gateway ──▶ Redis Streams ──�
 | `api` | مسیرهای `/v1/…` (ماشین، `X-Control-Key`) و `/v1/webapp/…` (انسان، امضای `initData`) |
 | `postgres` | دفتر، قفل ردیف، view تشخیص ناعدی `ledger_imbalance` |
 | `redis` | محدودساز نرخ، state فرم، dedupe رویداد تلگرام، صف استریم |
-| `billing-worker` | polls مصرف، checkpoint، تسویهٔ آبشاری، hold |
+| `billing-worker` | خواندن دوره‌ای مصرف، checkpoint، تسویهٔ آبشاری، hold |
 | `outbox-worker` | تحویل رویدادها با backoff |
 | `telegram-gateway` / `telegram-consumer` | دریافت webhook و کارگر ربات با consumer group |
 
@@ -80,10 +81,11 @@ curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/m
 sudo grep INITIAL_SETUP_TOKEN /root/pasarguard-control-plane-credentials.txt
 ```
 
-ربات را باز کنید، «وب‌اپ مدیریت» را بزنید و کسب‌وکار ریشه را با آن توکن بسازید. مسیر bootstrap تنها
-برای `ROOT_TELEGRAM_ID` و فقط یک‌بار باز است. سپس از **سرورها ← افزودن سرور** پنل‌های پاسارگارد را
-ثبت کنید؛ کلید API و رمز مالک پیش از ذخیره روی پنل تست می‌شوند، رمزنگاری می‌شوند و از هیچ endpoint
-خواندنی برنمی‌گردند. ثبت سرور هرگز از طریق سؤالات ترمینال انجام نمی‌شود.
+ربات را باز کنید، دکمهٔ وب‌اپ منوی تلگرام («پنل مدیریت») را بزنید و کسب‌وکار ریشه را با آن توکن بسازید.
+مسیر bootstrap فقط برای `ROOT_TELEGRAM_ID` و فقط یک‌بار باز است. سپس از
+**سرورها ← افزودن سرور** پنل‌های پاسارگارد را ثبت کنید؛ کلید API و رمز مالک پیش از ذخیره روی پنل
+تست می‌شوند، رمزنگاری می‌شوند و از هیچ endpoint خواندنی برنمی‌گردند. ثبت سرور هرگز از طریق سؤالات
+ترمینال انجام نمی‌شود.
 
 ## نقش‌ها
 
@@ -96,24 +98,24 @@ sudo grep INITIAL_SETUP_TOKEN /root/pasarguard-control-plane-credentials.txt
 | پشتیبان (`support`) | داشبورد، مالی (فقط مشاهده)، تیکت و پاسخ، مدیریت مشترکان |
 | مشاهده‌گر (`viewer`) | داشبورد، مشاهدهٔ مالی، خروجی گزارش |
 
-نقش از ردیف عضویت **فعال** سمت سرور خوانده می‌شود؛ نقش ناشناخته بدون هیچ امتیازی (`viewer` بی‌دسترسی
-خاص) در نظر گرفته می‌شود.
+نقش از ردیف عضویت **فعال** سمت سرور خوانده می‌شود و هر مقدار ناشناخته یا غایب به `viewer` نگاشت
+می‌شود؛ یعنی حالت پیش‌فرض سیستم «کمترین دسترسی» است، نه «دسترسی باز».
 
 ## عملیات
 
 ```bash
 cd /opt/pasarguard-control-plane
 
-bash scripts/doctor.sh                     # سلامت سرویس‌ها، MIME، باز/بسته بودن metrics، drift دفتر، lag استریم
+bash scripts/doctor.sh                     # سلامت سرویس‌ها، MIME، باز/بسته بودن metrics، انحراف دفتر، تأخیر استریم
 bash scripts/backup.sh                     # dump تأییدشده + چرخش نسخه‌ها (BACKUP_RETENTION)
-bash scripts/restore.sh backups/control-<STAMP>.sql.gz          # پیش‌فرض روی دیتابیس scratch
-bash scripts/restore.sh <file> --into control --force           # جایگزینی زنده، پس از backup ایمنی
+bash scripts/restore.sh backups/control-<STAMP>.sql.gz  # پیش‌فرض روی دیتابیس آزمایشی
+bash scripts/restore.sh <file> --into control --force   # جایگزینی زنده، پس از backup ایمنی
 sudo bash update.sh                        # pull با fast-forward، migration idempotent، rebuild، webhook
-sudo bash uninstall.sh                     # داده و volume ها می‌مانند؛ پاک کردن فقط با --purge-data
+sudo bash uninstall.sh                     # داده و volumeها می‌مانند؛ پاک کردن فقط با --purge-data
 ```
 
-`update.sh` هرگز `.env` را بازنویسی نمی‌کند، volume ها را حذف نمی‌کند و اگر migration شکست بخورد
-راه‌اندازی نمی‌کند. داکر در حذف نصب هرگز برداشته نمی‌شود.
+`update.sh` هرگز `.env` را بازنویسی نمی‌کند، volumeهای دیتابیس را حذف نمی‌کند و اگر migration شکست
+بخورد راه‌اندازی نمی‌کند. داکر در حذف نصب هرگز برداشته نمی‌شود.
 
 ## پیکربندی
 
@@ -144,8 +146,8 @@ src/control_plane/
   telegram_consumer.py  کارگر منوی ربات (consumer group)، پاسخ‌های فارسی
   pasarguard.py         کلاینت نازک HTTP پاسارگارد (تک‌محل مسیرهای پنل)
   outbox.py             تحویل حداقل-یک‌بار رویداد با backoff و dead-letter
-  worker.py             polls صورتحساب: checkpoint، تسویهٔ آبشاری، hold
-  migrate.py            runner مهاجرت با advisory lock و idempotent
+  worker.py             خواندن دوره‌ای صورتحساب: checkpoint، تسویهٔ آبشاری، hold
+  migrate.py            اجرای مهاجرت با advisory lock و idempotent
 webapp/                 وب‌اپ فارسی RTL تلگرام (تک‌صفحه، قابلیت‌محور)
 migrations/             SQL ترتیب‌دار، روی دیتابیس خالی و موجود یکسان
 scripts/                backup، restore، doctor، release-check، configure-telegram
@@ -171,6 +173,7 @@ k6 run load/k6.js                        # پروفایل بار مستند
 - [docs/ONBOARDING.md](docs/ONBOARDING.md) — راه‌اندازی ۹ مرحله‌ای از مسیر وب‌اپ
 - [docs/CAPACITY-10K.md](docs/CAPACITY-10K.md) — فرض‌های ظرفیت و پروفایل بار
 - [SECURITY.md](SECURITY.md) — رازها، هویت، ورودی‌ها و عملیات امنیتی
+- [CONTRIBUTING.md](CONTRIBUTING.md) — مسیر کار و خط‌قرمزهای تغییر در دفتر و دسترسی
 
 ## محدودیت‌های شناخته‌شده
 

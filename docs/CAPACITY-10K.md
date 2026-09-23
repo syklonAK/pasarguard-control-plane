@@ -1,22 +1,40 @@
-# Capacity plan: 10,000 users / 1,000 concurrent online
+# برنامهٔ ظرفیت: ۱۰٬۰۰۰ کاربر / ۱٬۰۰۰ اتصال همزمان
 
-## Important boundary
-VPN subscription traffic and 1,000 concurrent sessions must stay on PasarGuard/Xray nodes. Control Plane is not a proxy and must never sit in the data path. It handles reseller commands, billing, webhooks and aggregate usage only.
+## مرز مهم
 
-## Initial production topology
-- 2–3 Control API replicas, 4 Uvicorn workers each
-- 2 Telegram consumers; webhook gateway returns after Redis enqueue
-- PostgreSQL primary: 4 vCPU / 8–16 GB RAM / NVMe; daily backup + PITR
-- Redis: 1–2 GB with AOF, no-eviction
-- Billing polls admin aggregates, not all 10,000 users
-- Separate owner-operation worker and network allowlist for PasarGuard
+ترافیک اشتراک VPN و ۱٬۰۰۰ نشست همزمان باید روی نودهای پاسارگارد/Xray بماند. کنترل‌پلن پروکسی
+نیست و هرگز نباید در مسیر داده قرار بگیرد؛ آن فقط فرمان نماینده، صورتحساب، webhook و مصرف
+تجمیعی را پردازش می‌کند.
 
-## SLO targets
-- API availability: 99.9%
-- read p95 < 300 ms, write p95 < 600 ms
-- Telegram webhook ACK p95 < 100 ms
-- billing freshness < 60 s
-- RPO <= 5 min, RTO <= 30 min
+## توپولوژی اولیهٔ production
 
-## Release gate
-Do not call the system production-ready until: k6 profile passes, PostgreSQL failover is tested, restore drill passes, PasarGuard staging reconciliation has zero unexplained deltas, and 24-hour soak test completes without ledger imbalance.
+- ۲ تا ۳ replica برای کنترل API، هرکدام با ۴ worker اووی‌کورن
+- ۲ مصرف‌کنندهٔ تلگرام؛ دروازهٔ webhook پس از enqueue در Redis پاسخ می‌دهد
+- PostgreSQL اصلی: ۴ vCPU / ۸ تا ۱۶ گیگ RAM / NVMe؛ backup روزانه + PITR
+- Redis: ۱ تا ۲ گیگ با AOF و `noeviction`
+- صورتحساب‌گذار تجمیع ادمین را می‌خواند، نه تک‌تک ۱۰٬۰۰۰ کاربر را
+- کارگر جدا برای عملیات مالک و allowlist شبکه‌ای مجزا برای پاسارگارد
+
+## اهداف SLO
+
+| سنجه | هدف |
+| --- | --- |
+| دسترس‌پذیری API | ۹۹.۹٪ |
+| p95 خواندن | کمتر از ۳۰۰ms |
+| p95 نوشتن | کمتر از ۶۰۰ms |
+| p95 پاسخ webhook تلگرام | کمتر از ۱۰۰ms |
+| تازگی صورتحساب | کمتر از ۶۰ ثانیه |
+| RPO | حداکثر ۵ دقیقه |
+| RTO | حداکثر ۳۰ دقیقه |
+
+## دروازهٔ انتشار
+
+تا انجام نشدن این‌ها، سیستم را production-ready ندانید: پاس‌شدن پروفایل بار k6، تست failover
+پستگرس، پاس‌شدن تمرین بازیابی restore، صفر شدن اختلاف توجیه‌نشده در تطبیق با پنل staging
+پاسارگارد، و کامل‌شدن ۲۴ ساعت تست بدون ناعدی دفتر (`ledger_imbalance` خالی).
+
+پروفایل بار در [`load/k6.js`](../load/k6.js) است:
+
+```bash
+k6 run load/k6.js
+```
