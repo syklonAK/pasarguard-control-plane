@@ -174,6 +174,7 @@ k6 run load/k6.js                        # پروفایل بار مستند
 - [docs/CAPACITY-10K.md](docs/CAPACITY-10K.md) — فرض‌های ظرفیت و پروفایل بار
 - [SECURITY.md](SECURITY.md) — رازها، هویت، ورودی‌ها و عملیات امنیتی
 - [CONTRIBUTING.md](CONTRIBUTING.md) — مسیر کار و خط‌قرمزهای تغییر در دفتر و دسترسی
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — قواعد گفتگو و گزارش‌دهی
 
 ## محدودیت‌های شناخته‌شده
 
