@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -7,8 +8,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .app import (
-    Account, Actor, Binding, Closure, Contract, FundingRequest, Membership, Organization,
-    Panel, account, assert_depth_allowed, audit, db, membership_for, transfer, uid, web_identity,
+    Account, Actor, ApprovalRequest, Binding, Closure, Contract, FundingRequest, Membership,
+    Organization, Panel, account, assert_depth_allowed, audit, balance, db, membership_for, now,
+    transfer, uid, web_identity,
 )
 from .telegram_auth import TelegramAuthError, verify_init_data
 from .v04_app import app
@@ -140,7 +142,6 @@ def admin_funding_requests(identity=Depends(web_identity), s: Session = Depends(
 
 @app.post("/v1/webapp/admin/funding-requests/{request_id}/{decision}")
 def admin_decide_funding(request_id: str, decision: str, identity=Depends(web_identity), s: Session = Depends(db)):
-    from .app import now
     actor, _, root_org = membership_for(s, identity.user_id); actor_id = actor.id
     require_root(identity)
     if decision not in ("approve", "reject"):
@@ -168,3 +169,108 @@ def admin_decide_funding(request_id: str, decision: str, identity=Depends(web_id
           metadata={"amount_irr": request.amount_irr, "decided_by": actor_id})
     s.commit()
     return {"id": request.id, "status": request.status}
+
+APPROVAL_TTL_SECONDS = int(os.getenv("APPROVAL_TTL_SECONDS", "604800"))
+ADJUST = "wallet.adjust"
+
+class AdjustmentIn(BaseModel):
+    organization_id: str
+    amount_irr: int = Field(ne=0)
+    note: str = Field(min_length=10, max_length=2000)
+
+def approval_payload(approval):
+    return {"id": approval.id, "action": approval.action, "target_type": approval.target_type,
+            "target_id": approval.target_id, "status": approval.status, "payload": approval.payload,
+            "requester_id": approval.requester_id, "approver_id": approval.approver_id,
+            "decision_note": approval.decision_note, "expires_at": approval.expires_at,
+            "decided_at": approval.decided_at, "created_at": approval.created_at}
+
+def locked_pending_approval(s: Session, approval_id: str, now_value):
+    approval = s.scalar(select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update())
+    if not approval:
+        raise HTTPException(404, "approval request not found")
+    if approval.status != "pending":
+        raise HTTPException(409, "approval request is already decided")
+    if approval.expires_at <= now_value:
+        approval.status = "expired"
+        approval.decided_at = now_value
+        s.commit()
+        raise HTTPException(410, "approval request expired")
+    return approval
+
+def apply_wallet_adjustment(s: Session, approval, actor_id: str):
+    organization = s.get(Organization, approval.target_id)
+    if not organization:
+        raise HTTPException(404, "organization not found")
+    amount = int(approval.payload["amount_irr"])
+    # A correction may never leave an organization owing more than its agreed credit.
+    try:
+        if amount > 0:
+            transfer(s, "SYSTEM", organization.id, amount, f"approval:{approval.id}", "adjustment", approval.id, False, actor_id)
+        else:
+            transfer(s, organization.id, "SYSTEM", -amount, f"approval:{approval.id}", "adjustment", approval.id, True, actor_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(s, "adjustment.apply", "organization", organization.id, actor_id=actor_id, organization_id=organization.id,
+          metadata={"amount_irr": amount, "note": approval.payload["note"], "approval_id": approval.id})
+
+APPROVAL_APPLICATORS = {ADJUST: apply_wallet_adjustment}
+
+@app.post("/v1/webapp/admin/adjustments")
+def request_adjustment(x: AdjustmentIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, membership, organization = membership_for(s, identity.user_id)
+    if membership.role not in ("reseller_admin", "operator", "finance"):
+        raise HTTPException(403, "wallet adjustment permission required")
+    target = s.get(Organization, x.organization_id)
+    if not target:
+        raise HTTPException(404, "organization not found")
+    if organization.id != target.id and target.parent_id != organization.id:
+        raise HTTPException(403, "adjustment is limited to your own subtree")
+    if identity.user_id == configured_root_id():
+        # The root administrator is the approver, so applying directly keeps the maker-checker rule meaningful.
+        approval = ApprovalRequest(requester_id=actor.id, approver_id=actor.id, action=ADJUST, target_type="organization",
+                                   target_id=target.id, payload={"amount_irr": x.amount_irr, "note": x.note},
+                                   status="pending", expires_at=now() + timedelta(seconds=APPROVAL_TTL_SECONDS))
+        s.add(approval); s.flush()
+        apply_wallet_adjustment(s, approval, actor.id)
+        approval.status = "executed"; approval.decided_at = now(); approval.decision_note = x.note
+        s.commit()
+        return {"id": approval.id, "status": approval.status, "balance_irr": balance(s, target.id)}
+    approval = ApprovalRequest(requester_id=actor.id, action=ADJUST, target_type="organization", target_id=target.id,
+                               payload={"amount_irr": x.amount_irr, "note": x.note},
+                               expires_at=now() + timedelta(seconds=APPROVAL_TTL_SECONDS))
+    s.add(approval)
+    audit(s, "adjustment.request", "organization", target.id, actor_id=actor.id, organization_id=organization.id,
+          metadata={"amount_irr": x.amount_irr, "note": x.note})
+    s.commit()
+    return {"id": approval.id, "status": approval.status}
+
+@app.get("/v1/webapp/admin/approvals")
+def list_approvals(identity=Depends(web_identity), s: Session = Depends(db)):
+    require_root(identity); membership_for(s, identity.user_id)
+    rows = s.scalars(select(ApprovalRequest).where(ApprovalRequest.status == "pending").order_by(ApprovalRequest.created_at).limit(200)).all()
+    return [approval_payload(a) for a in rows]
+
+@app.post("/v1/webapp/admin/approvals/{approval_id}/{decision}")
+def decide_approval(approval_id: str, decision: str, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, _ = membership_for(s, identity.user_id)
+    require_root(identity)
+    if decision not in ("approve", "reject"):
+        raise HTTPException(422, "decision must be approve or reject")
+    approval = locked_pending_approval(s, approval_id, now())
+    if decision == "reject":
+        approval.status = "rejected"; approval.approver_id = actor.id
+        approval.decided_at = now(); approval.decision_note = "rejected by system administrator"
+    else:
+        applicator = APPROVAL_APPLICATORS.get(approval.action)
+        if not applicator:
+            raise HTTPException(422, f"no applicator registered for {approval.action}")
+        applicator(s, approval, actor.id)
+        approval.status = "executed"; approval.approver_id = actor.id
+        approval.decided_at = now(); approval.decision_note = "approved by system administrator"
+    audit(s, f"approval.{decision}", "approval_request", approval.id, actor_id=actor.id,
+          metadata={"action": approval.action, "target_id": approval.target_id, "payload": approval.payload})
+    from .outbox import enqueue
+    enqueue(s, "approval.granted", approval.id, {"action": approval.action, "status": approval.status})
+    s.commit()
+    return {"id": approval.id, "status": approval.status}

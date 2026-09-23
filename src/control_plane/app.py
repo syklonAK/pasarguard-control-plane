@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID, insert as pg_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -165,7 +165,12 @@ class OrgIn(BaseModel):
     parent_id:str|None=None; price_per_gib_irr:int|None=Field(default=None,ge=0); credit_limit_irr:int=Field(default=0,ge=0)
 class FundIn(BaseModel): amount_irr:int=Field(gt=0); idempotency_key:str=Field(min_length=8,max_length=180)
 class UsageIn(BaseModel): binding_id:str; lifetime_bytes:int=Field(ge=0); observed_at:datetime
-class PanelIn(BaseModel): name:str; base_url:str; api_key_ref:str|None=None; owner_user_ref:str|None=None; owner_pass_ref:str|None=None; usage_coefficient:Decimal=Field(default=Decimal("1"),gt=Decimal("0"),le=Decimal("1000"))
+class PanelIn(BaseModel):
+    # Secrets are never accepted as plain references over HTTP; register a server through the
+    # authenticated WebApp so it can be encrypted server-side.
+    model_config=ConfigDict(extra="forbid")
+    name:str=Field(min_length=2,max_length=120); base_url:str=Field(min_length=10,max_length=500)
+    usage_coefficient:Decimal=Field(default=Decimal("1"),gt=Decimal("0"),le=Decimal("1000"))
 class BindingIn(BaseModel): organization_id:str; panel_id:str; pg_admin_id:int; username:str
 
 def db():
@@ -191,6 +196,16 @@ def balance(s:Session,org:str)->int:
     return int(account(s,org).balance_irr)
 def enable_ledger_write(s:Session)->None:
     s.execute(text("SELECT set_config('control.ledger_write','on',true)"))
+def validate_panel_url(url:str)->None:
+    """A panel must be reachable over TLS without credentials smuggled into the URL."""
+    from urllib.parse import urlsplit
+    try:
+        parsed=urlsplit(url)
+    except ValueError as exc:
+        raise HTTPException(422,"server URL is invalid") from exc
+    if parsed.scheme!="https":raise HTTPException(422,"server URL must use HTTPS")
+    if not parsed.hostname:raise HTTPException(422,"server URL must include a hostname")
+    if parsed.username or parsed.password:raise HTTPException(422,"credentials are not allowed in the server URL")
 def depth_of(s:Session,org_id:str)->int:
     return int(s.scalar(select(func.max(Closure.depth)).where(Closure.descendant_id==org_id)) or 0)
 def effective_depth_limit(s:Session,parent:Organization)->int:
@@ -241,8 +256,8 @@ class BillingHold(ValueError):
         self.binding_id=binding_id;self.organization_id=organization_id;self.amount_irr=amount_irr
 
 def record_hold(s:Session,binding_id:str,organization_id:str,amount_irr:int=0):
-    exists=s.scalar(select(Outbox.id).where(Outbox.topic=="billing.hold_required",Outbox.aggregate_id==binding_id,Outbox.status=="pending"))
-    if not exists:s.add(Outbox(topic="billing.hold_required",aggregate_id=binding_id,payload=json.dumps({"organization_id":organization_id,"amount_irr":amount_irr})))
+    from .outbox import enqueue
+    return enqueue(s,"billing.hold_required",binding_id,{"organization_id":organization_id,"amount_irr":amount_irr})
 
 RESET_CONFIRM_READINGS=env_int("USAGE_RESET_CONFIRM_READINGS",3)
 
@@ -258,7 +273,8 @@ def observe(s:Session,data:UsageIn):
         if cp.anomaly_count>=RESET_CONFIRM_READINGS:
             cp.lifetime_bytes=data.lifetime_bytes;cp.observed_at=data.observed_at;cp.anomaly_count=0
             s.add(Usage(binding_id=b.id,lifetime_bytes=data.lifetime_bytes,delta_bytes=0,status="reset_baseline",observed_at=data.observed_at))
-            s.add(Outbox(topic="usage.reset_detected",aggregate_id=b.id,payload=json.dumps({"organization_id":b.organization_id,"lifetime_bytes":data.lifetime_bytes})))
+            from .outbox import enqueue
+            enqueue(s,"usage.reset_detected",b.id,{"organization_id":b.organization_id,"lifetime_bytes":data.lifetime_bytes})
         return []
     delta=data.lifetime_bytes-cp.lifetime_bytes
     coefficient=Decimal(str(s.scalar(select(Panel.usage_coefficient).where(Panel.id==b.panel_id)) or 1))
@@ -308,7 +324,10 @@ def wallet(org_id:str,s:Session=Depends(db)):
     b=balance(s,org_id);return {"balance_irr":b,"credit_limit_irr":o.credit_limit_irr,"available_irr":b+o.credit_limit_irr}
 @app.post("/v1/panels",dependencies=[Depends(auth)])
 def panel(x:PanelIn,s:Session=Depends(db)):
-    p=Panel(**x.model_dump(),verify_tls=True);s.add(p);audit(s,"panel.create","panel",p.id,metadata={"base_url":p.base_url});s.commit();return {"id":p.id,"name":p.name}
+    url=x.base_url.rstrip("/")
+    validate_panel_url(url)
+    p=Panel(name=x.name,base_url=url,usage_coefficient=x.usage_coefficient,verify_tls=True)
+    s.add(p);audit(s,"panel.create","panel",p.id,metadata={"base_url":url,"usage_coefficient":str(x.usage_coefficient)});s.commit();return {"id":p.id,"name":p.name}
 @app.post("/v1/bindings",dependencies=[Depends(auth)])
 def binding(x:BindingIn,s:Session=Depends(db)):
     if not s.get(Organization,x.organization_id) or not s.get(Panel,x.panel_id):raise HTTPException(404,"org/panel not found")

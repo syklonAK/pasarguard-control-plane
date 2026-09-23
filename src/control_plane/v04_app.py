@@ -1,13 +1,15 @@
 import hmac
 import os
+from decimal import Decimal
+
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .app import (
     Actor, Binding, Closure, Membership, Organization, Panel, PanelOwner, SystemSetting,
-    account, app, audit, db, membership_for, put_setting, web_identity,
+    account, app, audit, db, membership_for, put_setting, validate_panel_url, web_identity,
 )
 from .pasarguard import Client
 from .secrets import encrypt_secret, resolve_secret
@@ -20,6 +22,9 @@ class BootstrapIn(BaseModel):
     setup_token: str = Field(min_length=32, max_length=256)
 
 class WebPanelIn(BaseModel):
+    # Only secret *material* is accepted, and only to be encrypted here; a caller may not
+    # choose how it is stored by submitting an already-resolved reference.
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=2, max_length=120)
     base_url: str = Field(min_length=10, max_length=500)
     api_key: str = Field(min_length=8, max_length=500)
@@ -27,7 +32,7 @@ class WebPanelIn(BaseModel):
     owner_password: str | None = Field(default=None, max_length=500)
     pg_admin_id: int | None = Field(default=None, gt=0)
     admin_username: str | None = Field(default=None, max_length=80)
-    usage_coefficient: float = Field(default=1.0, gt=0, le=1000)
+    usage_coefficient: Decimal = Field(default=Decimal("1"), gt=Decimal("0"), le=Decimal("1000"))
 
 
 def optional_membership(s: Session, telegram_id: int):
@@ -92,13 +97,14 @@ def web_panels(identity=Depends(web_identity), s: Session = Depends(db)):
 @app.post("/v1/webapp/panels")
 def web_create_panel(x: WebPanelIn, identity=Depends(web_identity), s: Session = Depends(db)):
     _, _, organization = manager(s, identity.user_id)
-    if not x.base_url.startswith("https://"):
-        raise HTTPException(422, "server URL must use HTTPS")
+    validate_panel_url(x.base_url)
+    url = x.base_url.rstrip("/")
     try:
-        probe = Client(x.base_url.rstrip("/"), x.api_key, x.owner_username, x.owner_password, True).nodes()
+        probe = Client(url, x.api_key, x.owner_username, x.owner_password, True).nodes()
     except Exception as exc:
-        raise HTTPException(422, f"PasarGuard connection failed: {exc}") from exc
-    panel = Panel(name=x.name, base_url=x.base_url.rstrip("/"), api_key_ref=encrypt_secret(x.api_key), owner_user_ref=encrypt_secret(x.owner_username), owner_pass_ref=encrypt_secret(x.owner_password), usage_coefficient=x.usage_coefficient, verify_tls=True)
+        # The upstream failure can echo the request URL; never let that reach the client log.
+        raise HTTPException(422, "PasarGuard connection failed: the server did not answer the test request") from exc
+    panel = Panel(name=x.name, base_url=url, api_key_ref=encrypt_secret(x.api_key), owner_user_ref=encrypt_secret(x.owner_username), owner_pass_ref=encrypt_secret(x.owner_password), usage_coefficient=x.usage_coefficient, verify_tls=True)
     s.add(panel); s.flush(); s.add(PanelOwner(panel_id=panel.id, organization_id=organization.id))
     if x.pg_admin_id:
         if s.scalar(select(Binding.id).where(Binding.organization_id == organization.id)):

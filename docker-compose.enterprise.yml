@@ -58,6 +58,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  outbox-worker:
+    restart: unless-stopped
+    build: .
+    env_file: .env
+    command: ["python", "-m", "control_plane.outbox"]
+    depends_on:
+      postgres:
+        condition: service_healthy
   telegram-gateway:
     restart: unless-stopped
     build: .
