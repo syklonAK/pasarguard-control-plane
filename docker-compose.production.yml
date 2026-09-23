@@ -1,17 +1,23 @@
 services:
   gateway:
     ports: []
-    expose: ["80"]
+    expose:
+      - "80"
   caddy:
     image: caddy:2.9-alpine
     restart: unless-stopped
     env_file: .env
-    ports: ["80:80", "443:443", "443:443/udp"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    depends_on: [gateway]
+    depends_on:
+      gateway:
+        condition: service_healthy
 volumes:
   caddy_data: {}
   caddy_config: {}
