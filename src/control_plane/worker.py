@@ -4,13 +4,9 @@ from datetime import datetime,timezone
 from sqlalchemy import select
 from .app import BillingHold,Binding,Panel,SessionLocal,UsageIn,observe,record_hold
 from .pasarguard import Client
+from .secrets import resolve_secret
 
-def secret(ref):
- if ref is None:return None
- if not ref.startswith("env://"):raise RuntimeError("only env:// secret refs allowed")
- value=os.getenv(ref[6:])
- if not value:raise RuntimeError("missing secret")
- return value
+def secret(ref): return resolve_secret(ref)
 
 def poll():
  with SessionLocal() as s:
