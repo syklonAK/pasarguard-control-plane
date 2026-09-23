@@ -42,10 +42,10 @@ configure_telegram(){
     --data-urlencode "url=${HTTPS}${DOMAIN}/telegram/webhook" \
     --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" >/dev/null
   local commands command_payload menu_payload
-  commands='[{"command":"start","description":"Open business menu"},{"command":"dashboard","description":"Open control panel"},{"command":"servers","description":"Manage servers and nodes"},{"command":"support","description":"Get support"}]'
+  commands='[{"command":"start","description":"باز کردن منوی مدیریت"},{"command":"dashboard","description":"ورود به پنل مدیریت"},{"command":"servers","description":"مدیریت سرورها و نودها"},{"command":"support","description":"راهنما و پشتیبانی"}]'
   command_payload="$(jq -nc --argjson commands "$commands" '{commands:$commands}')"
   curl -fsS "${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" -H 'Content-Type: application/json' -d "$command_payload" >/dev/null
-  menu_payload="$(jq -nc --arg url "$WEBAPP_URL" '{menu_button:{type:"web_app",text:"Open Panel",web_app:{url:$url}}}')"
+  menu_payload="$(jq -nc --arg url "$WEBAPP_URL" '{menu_button:{type:"web_app",text:"پنل مدیریت",web_app:{url:$url}}}')"
   curl -fsS "${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/setChatMenuButton" -H 'Content-Type: application/json' -d "$menu_payload" >/dev/null
 }
 
