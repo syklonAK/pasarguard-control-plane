@@ -2,6 +2,7 @@ import hmac
 import os
 from decimal import Decimal
 
+import httpx
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -35,6 +36,16 @@ class WebPanelIn(BaseModel):
     usage_coefficient: Decimal = Field(default=Decimal("1"), gt=Decimal("0"), le=Decimal("1000"))
 
 
+class AdminLimitIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    limit_use_in_bytes: int = Field(ge=0)
+
+
+class CoefficientIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    usage_coefficient: Decimal = Field(gt=Decimal("0"), le=Decimal("1000"))
+
+
 def optional_membership(s: Session, telegram_id: int):
     actor = s.scalar(select(Actor).where(Actor.telegram_id == telegram_id, Actor.status == "active"))
     if not actor:
@@ -57,6 +68,50 @@ def owned_panel(s: Session, panel_id: str, organization_id: str):
 
 def panel_client(panel: Panel):
     return Client(panel.base_url, resolve_secret(panel.api_key_ref), resolve_secret(panel.owner_user_ref), resolve_secret(panel.owner_pass_ref), panel.verify_tls)
+
+def org_binding(s: Session, organization_id: str, panel_id: str) -> Binding:
+    binding = s.scalar(select(Binding).where(Binding.organization_id == organization_id, Binding.panel_id == panel_id))
+    if not binding:
+        raise HTTPException(409, "this organization has no billing binding on that server")
+    return binding
+
+def _enabled_flag(value: str) -> bool:
+    if value == "enable":
+        return True
+    if value == "disable":
+        return False
+    raise HTTPException(422, "operation must be enable or disable")
+
+def _unwrap(result, key: str):
+    if isinstance(result, list):
+        return result
+    rows = (result or {}).get(key, result if isinstance(result, dict) else [])
+    return rows if isinstance(rows, list) else []
+
+def panel_operation(s: Session, panel: Panel, organization_id: str, action: str, run, actor_id: str | None = None, metadata: dict | None = None):
+    """Run one panel call for an owned server, auditing it and translating failures safely.
+
+    The upstream exception text can contain the request URL, so only a fixed
+    description and the status code ever reach the caller.
+    """
+    try:
+        result = run(panel_client(panel))
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        audit(s, f"{action}.failed", "panel", panel.id, actor_id=actor_id, organization_id=organization_id,
+              metadata={"status_code": code, **(metadata or {})})
+        s.commit()
+        if code in (401, 403):
+            raise HTTPException(502, "اعتبارنامهٔ ذخیره‌شده در PasarGuard پذیرفته نشد") from exc
+        raise HTTPException(502, f"سرور PasarGuard این عملیات را رد کرد (HTTP {code})") from exc
+    except Exception as exc:
+        audit(s, f"{action}.failed", "panel", panel.id, actor_id=actor_id, organization_id=organization_id,
+              metadata={"unreachable": True, **(metadata or {})})
+        s.commit()
+        raise HTTPException(502, "اتصال به PasarGuard برقرار نشد") from exc
+    audit(s, action, "panel", panel.id, actor_id=actor_id, organization_id=organization_id, metadata=metadata or {})
+    s.commit()
+    return result
 
 @app.get("/v1/webapp/session")
 def web_session(identity=Depends(web_identity), s: Session = Depends(db)):
@@ -118,18 +173,71 @@ def web_create_panel(x: WebPanelIn, identity=Depends(web_identity), s: Session =
 @app.get("/v1/webapp/panels/{panel_id}/nodes")
 def web_panel_nodes(panel_id: str, identity=Depends(web_identity), s: Session = Depends(db)):
     _, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
-    try:
-        result = panel_client(panel).nodes()
-    except Exception as exc:
-        raise HTTPException(502, f"PasarGuard request failed: {exc}") from exc
-    nodes = result.get("nodes", result if isinstance(result, list) else [])
-    return {"panel_id": panel.id, "nodes": nodes if isinstance(nodes, list) else []}
+    nodes = panel_operation(s, panel, organization.id, "panel.nodes.read", lambda c: c.nodes())
+    return {"panel_id": panel.id, "nodes": _unwrap(nodes, "nodes")}
 
 @app.post("/v1/webapp/panels/{panel_id}/nodes/{node_id}/reconnect")
 def web_reconnect_node(panel_id: str, node_id: int, identity=Depends(web_identity), s: Session = Depends(db)):
-    _, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
-    try:
-        result = panel_client(panel).reconnect_node(node_id)
-    except Exception as exc:
-        raise HTTPException(502, f"PasarGuard reconnect failed: {exc}") from exc
+    actor, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    result = panel_operation(s, panel, organization.id, "node.reconnect", lambda c: c.reconnect_node(node_id), actor.id, {"node_id": node_id})
     return {"ok": True, "result": result}
+
+@app.get("/v1/webapp/panels/{panel_id}/nodes/{node_id}/status")
+def web_node_status(panel_id: str, node_id: int, identity=Depends(web_identity), s: Session = Depends(db)):
+    _, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    return panel_operation(s, panel, organization.id, "node.status.read", lambda c: c.node_status(node_id))
+
+@app.post("/v1/webapp/panels/{panel_id}/nodes/{node_id}/{enabled}")
+def web_set_node_enabled(panel_id: str, node_id: int, enabled: str, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    flag = _enabled_flag(enabled)
+    result = panel_operation(s, panel, organization.id, f"node.{'enable' if flag else 'disable'}",
+                             lambda c: c.set_node_enabled(node_id, flag), actor.id, {"node_id": node_id})
+    return {"ok": True, "enabled": flag, "result": result}
+
+@app.get("/v1/webapp/panels/{panel_id}/users")
+def web_panel_users(panel_id: str, offset: int = 0, limit: int = 50, identity=Depends(web_identity), s: Session = Depends(db)):
+    _, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    binding = org_binding(s, organization.id, panel.id)
+    if limit < 1 or limit > 200:
+        raise HTTPException(422, "limit must be between 1 and 200")
+    users = panel_operation(s, panel, organization.id, "user.list", lambda c: c.users(binding.pg_admin_id, offset, limit))
+    return {"panel_id": panel.id, "admin_id": binding.pg_admin_id, "offset": offset, "limit": limit,
+            "users": _unwrap(users, "users"), "total": users.get("total") if isinstance(users, dict) else None}
+
+@app.post("/v1/webapp/panels/{panel_id}/users/{user_id}/reset-data")
+def web_reset_user_data(panel_id: str, user_id: int, identity=Depends(web_identity), s: Session = Depends(db)):
+    """Clears a subscriber's counters on the panel; destructive, so it is always audited."""
+    actor, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    result = panel_operation(s, panel, organization.id, "user.reset_data", lambda c: c.reset_user_data(user_id), actor.id, {"user_id": user_id})
+    return {"ok": True, "result": result}
+
+@app.post("/v1/webapp/panels/{panel_id}/users/{user_id}/{enabled}")
+def web_set_user_enabled(panel_id: str, user_id: int, enabled: str, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    flag = _enabled_flag(enabled)
+    result = panel_operation(s, panel, organization.id, f"user.{'enable' if flag else 'disable'}",
+                             lambda c: c.set_user_enabled(user_id, flag), actor.id, {"user_id": user_id})
+    return {"ok": True, "enabled": flag, "result": result}
+
+@app.post("/v1/webapp/panels/{panel_id}/limit")
+def web_set_admin_limit(panel_id: str, x: AdminLimitIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id); panel = owned_panel(s, panel_id, organization.id)
+    binding = org_binding(s, organization.id, panel.id)
+    result = panel_operation(s, panel, organization.id, "admin.limit",
+                             lambda c: c.set_admin_limit(binding.pg_admin_id, x.limit_use_in_bytes), actor.id,
+                             {"pg_admin_id": binding.pg_admin_id, "limit_use_in_bytes": x.limit_use_in_bytes})
+    return {"ok": True, "result": result}
+
+@app.post("/v1/webapp/panels/{panel_id}/coefficient")
+def web_set_usage_coefficient(panel_id: str, x: CoefficientIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id)
+    if identity.user_id != int(os.getenv("ROOT_TELEGRAM_ID", "0") or 0):
+        raise HTTPException(403, "only the system administrator may change the billing coefficient")
+    panel = owned_panel(s, panel_id, organization.id)
+    panel.usage_coefficient = x.usage_coefficient
+    audit(s, "panel.coefficient", "panel", panel.id, actor_id=actor.id, organization_id=organization.id,
+          metadata={"usage_coefficient": str(x.usage_coefficient)})
+    s.commit()
+    s.refresh(panel)
+    return {"id": panel.id, "usage_coefficient": str(panel.usage_coefficient)}

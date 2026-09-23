@@ -5,15 +5,15 @@ import os
 import re
 
 import httpx
+from fastapi import HTTPException
 from redis.asyncio import Redis
 from sqlalchemy import func, select, text
 
 from .app import (
     Account, Actor, Binding, Checkpoint, Closure, Contract, Entry, FundingRequest,
-    Membership, Organization, Panel, SessionLocal, Transaction, account, transfer,
+    Membership, Organization, Panel, PanelOwner, SessionLocal, Transaction, account, transfer,
 )
-from .pasarguard import Client
-from .secrets import resolve_secret
+from .v04_app import _unwrap, panel_operation
 
 STREAM = "telegram_updates"
 GROUP = "telegram-workers"
@@ -92,28 +92,70 @@ def server_list(chat_id):
     keyboard.append([{"text":"➕ ثبت سرور جدید","web_app":{"url":os.getenv("WEBAPP_URL","")}}])
     return "\n\n".join(lines),{"inline_keyboard":keyboard}
 
-def panel_row(chat_id,panel_id):
+def bot_panel(chat_id,panel_id):
+    """Resolve a panel the caller owns and hand back the open session that loaded it."""
     ctx=require_context(chat_id)
-    with SessionLocal() as session:
-        return session.execute(text("SELECT p.id,p.name,p.base_url,p.api_key_ref,p.owner_user_ref,p.owner_pass_ref,p.verify_tls FROM panels p JOIN panel_owners po ON po.panel_id=p.id WHERE p.id=:panel AND po.organization_id=:org AND p.status='active'"),{"panel":panel_id,"org":ctx["organization_id"]}).mappings().first()
+    session=SessionLocal()
+    link=session.scalar(select(PanelOwner).where(PanelOwner.panel_id==panel_id,PanelOwner.organization_id==ctx["organization_id"]))
+    panel=session.get(Panel,panel_id) if link else None
+    if not panel or panel.status!="active":
+        session.close()
+        raise PermissionError("سرور پیدا نشد یا غیرفعال است.")
+    return session,ctx,panel
+
+def run_panel_operation(session,ctx,panel,action,run,metadata=None):
+    """Share one audited code path with the WebApp and turn its errors into Persian replies."""
+    try:
+        return panel_operation(session,panel,ctx["organization_id"],action,run,ctx["actor_id"],metadata)
+    except HTTPException as exc:
+        raise PermissionError(str(exc.detail)) from exc
 
 def node_list(chat_id,panel_id):
-    row=panel_row(chat_id,panel_id)
-    if not row:raise PermissionError("server not found")
-    client=Client(row["base_url"],resolve_secret(row["api_key_ref"]),resolve_secret(row["owner_user_ref"]),resolve_secret(row["owner_pass_ref"]),row["verify_tls"])
-    response=client.nodes();nodes=response.get("nodes",response if isinstance(response,list) else [])
-    lines=[f"<b>نودهای {html.escape(row['name'])}</b>"];keyboard=[]
+    session,ctx,panel=bot_panel(chat_id,panel_id)
+    try:
+        nodes=_unwrap(run_panel_operation(session,ctx,panel,"panel.nodes.read",lambda c:c.nodes()),"nodes")
+    finally:
+        session.close()
+    lines=[f"<b>نودهای {html.escape(panel.name)}</b>"];keyboard=[]
     for node in nodes[:20]:
-        node_id=node.get("id");name=str(node.get("name") or f"Node {node_id}");status=str(node.get("status") or "unknown")
-        lines.append(f"• {html.escape(name)} — <code>{html.escape(status)}</code>")
-        if node_id is not None:keyboard.append([{"text":f"🔄 اتصال مجدد {name[:28]}","callback_data":f"reconnect|{panel_id}|{node_id}"}])
-    if not nodes:lines.append("نودی دریافت نشد.")
+        node_id=node.get("id")
+        if node_id is None:continue
+        name=str(node.get("name") or f"Node {node_id}")
+        enabled=node.get("enable",node.get("status"))
+        state="🟢" if enabled in (True,"online","active") else "⚪"
+        lines.append(f"{state} • {html.escape(name)} — <code>{html.escape(str(node.get('message') or node.get('status') or ''))}</code>")
+        keyboard.append([{"text":f"🔄 {name[:22]}","callback_data":f"node|{panel_id}|{node_id}|reconnect"},
+                         {"text":("⏸" if enabled in (True,"online","active") else "▶️")+" "+name[:20],
+                          "callback_data":f"node|{panel_id}|{node_id}|{'disable' if enabled in (True,'online','active') else 'enable'}"}])
+        keyboard.append([{"text":f"♻️ بازنشانی {name[:22]}","callback_data":f"node|{panel_id}|{node_id}|reset"},
+                         {"text":f"📊 وضعیت {name[:22]}","callback_data":f"node|{panel_id}|{node_id}|status"}])
+    if not keyboard:lines.append("نودی دریافت نشد.")
     return "\n".join(lines),{"inline_keyboard":keyboard} if keyboard else None
 
-def reconnect_node(chat_id,panel_id,node_id):
-    row=panel_row(chat_id,panel_id)
-    if not row:raise PermissionError("server not found")
-    Client(row["base_url"],resolve_secret(row["api_key_ref"]),resolve_secret(row["owner_user_ref"]),resolve_secret(row["owner_pass_ref"]),row["verify_tls"]).reconnect_node(int(node_id))
+NODE_OPERATIONS={
+    "enable":("node.enable",lambda i,c:c.set_node_enabled(i,True),"نود روشن شد."),
+    "disable":("node.disable",lambda i,c:c.set_node_enabled(i,False),"نود خاموش شد."),
+    "reconnect":("node.reconnect",lambda i,c:c.reconnect_node(i),"دستور اتصال مجدد ارسال شد."),
+    "reset":("node.reset",lambda i,c:c.reset_node(i),"دستور بازنشانی نود ارسال شد."),
+}
+
+def node_action(chat_id,panel_id,node_id,action):
+    """Runs one node operation and returns the Persian confirmation, or the status text."""
+    if action=="status":
+        session,ctx,panel=bot_panel(chat_id,panel_id)
+        try:
+            status=run_panel_operation(session,ctx,panel,"node.status.read",lambda c:c.node_status(int(node_id)),{"node_id":int(node_id)})
+        finally:
+            session.close()
+        return html.escape(json.dumps(status,ensure_ascii=False)[:900])
+    if action not in NODE_OPERATIONS:raise PermissionError("عملیات نامعتبر است.")
+    audit_action,call,reply=NODE_OPERATIONS[action]
+    session,ctx,panel=bot_panel(chat_id,panel_id)
+    try:
+        run_panel_operation(session,ctx,panel,audit_action,lambda c:call(int(node_id),c),{"node_id":int(node_id)})
+    finally:
+        session.close()
+    return reply
 
 def reseller_list(chat_id,admin=False):
     ctx=require_context(chat_id)
@@ -252,9 +294,15 @@ async def handle_callback(chat_id,callback_id,data):
     try:
         parts=data.split("|")
         if parts[0]=="nodes" and len(parts)==2:message,markup=await asyncio.to_thread(node_list,chat_id,parts[1]);await answer_callback(callback_id);await send(chat_id,message,markup)
-        elif parts[0]=="reconnect" and len(parts)==3:await asyncio.to_thread(reconnect_node,chat_id,parts[1],parts[2]);await answer_callback(callback_id,"دستور اتصال مجدد ارسال شد")
+        elif parts[0]=="node" and len(parts)==4:
+            message=await asyncio.to_thread(node_action,chat_id,parts[1],parts[2],parts[3])
+            await answer_callback(callback_id,message if parts[3]!="status" else "وضعیت ارسال شد")
+            if parts[3]=="status":await send(chat_id,f"<b>وضعیت نود</b>\n<code>{message}</code>")
         elif parts[0] in ("fundok","fundno") and len(parts)==2:message=await asyncio.to_thread(decide_funding,chat_id,parts[1],parts[0]=="fundok");await answer_callback(callback_id,message);await send(chat_id,message,ADMIN_MENU)
         else:await answer_callback(callback_id,"دستور نامعتبر")
+    except PermissionError as exc:
+        # These messages are written for the user; never forward an unexpected exception text.
+        print(f"callback {data}: {exc}",flush=True);await answer_callback(callback_id,str(exc)[:190])
     except Exception as exc:print(f"callback {data}: {exc}",flush=True);await answer_callback(callback_id,"عملیات انجام نشد")
 
 async def main():
