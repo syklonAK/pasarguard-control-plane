@@ -2,47 +2,92 @@ services:
   postgres:
     restart: unless-stopped
     image: postgres:17-alpine
-    command: ["postgres","-c","max_connections=200","-c","shared_buffers=512MB","-c","effective_cache_size=2GB","-c","work_mem=4MB","-c","maintenance_work_mem=128MB","-c","wal_compression=on"]
-    environment: {POSTGRES_DB: control, POSTGRES_USER: control, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-control}"}
-    volumes: ["pg_data:/var/lib/postgresql/data"]
-    healthcheck: {test: ["CMD-SHELL", "pg_isready -U control -d control"], interval: 5s, timeout: 3s, retries: 30}
-    deploy: {resources: {limits: {cpus: "${POSTGRES_CPU_LIMIT:-1.0}", memory: "${POSTGRES_MEMORY_LIMIT:-2G}"}}}
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=512MB", "-c", "effective_cache_size=2GB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=128MB", "-c", "wal_compression=on"]
+    environment:
+      POSTGRES_DB: control
+      POSTGRES_USER: control
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-control}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control -d control"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPU_LIMIT:-1.0}"
+          memory: "${POSTGRES_MEMORY_LIMIT:-2G}"
+
   redis:
     restart: unless-stopped
     image: redis:7.4-alpine
-    command: ["redis-server","--appendonly","yes","--maxmemory","256mb","--maxmemory-policy","noeviction"]
-    volumes: ["redis_data:/data"]
-    healthcheck: {test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 20}
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   api:
     restart: unless-stopped
     build: .
     env_file: .env
-    command: ["uvicorn","control_plane.v04_app:app","--host","0.0.0.0","--port","8000","--workers","${API_WORKERS:-1}","--limit-concurrency","1000","--backlog","2048"]
-    depends_on: {postgres: {condition: service_healthy}}
-    deploy: {replicas: ${API_REPLICAS:-1}, resources: {limits: {cpus: "${API_CPU_LIMIT:-0.75}", memory: "${API_MEMORY_LIMIT:-1G}"}}}
+    command: ["uvicorn", "control_plane.v04_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "${API_WORKERS:-1}", "--limit-concurrency", "1000", "--backlog", "2048"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: ${API_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "${API_CPU_LIMIT:-0.75}"
+          memory: "${API_MEMORY_LIMIT:-1G}"
+
   billing-worker:
     restart: unless-stopped
     build: .
     env_file: .env
-    command: ["python","-m","control_plane.worker"]
-    depends_on: {postgres: {condition: service_healthy}}
+    command: ["python", "-m", "control_plane.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   telegram-gateway:
     restart: unless-stopped
     build: .
     env_file: .env
-    command: ["uvicorn","control_plane.telegram_gateway:app","--host","0.0.0.0","--port","8010","--workers","1"]
-    depends_on: {redis: {condition: service_healthy}}
+    command: ["uvicorn", "control_plane.telegram_gateway:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
   telegram-consumer:
     restart: unless-stopped
     build: .
     env_file: .env
-    command: ["python","-m","control_plane.telegram_consumer"]
-    depends_on: {redis: {condition: service_healthy}}
-    deploy: {replicas: ${TELEGRAM_CONSUMER_REPLICAS:-1}}
+    command: ["python", "-m", "control_plane.telegram_consumer"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${TELEGRAM_CONSUMER_REPLICAS:-1}
+
   gateway:
     restart: unless-stopped
     image: nginx:1.27-alpine
-    expose: ["80"]
-    volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro", "./webapp:/usr/share/nginx/html/app:ro"]
-    depends_on: [api, telegram-gateway]
-volumes: {pg_data: {}, redis_data: {}}
+    expose:
+      - "80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./webapp:/usr/share/nginx/html/app:ro
+    depends_on:
+      - api
+      - telegram-gateway
+
+volumes:
+  pg_data: {}
+  redis_data: {}
