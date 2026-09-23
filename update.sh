@@ -16,7 +16,7 @@ info "Validating Telegram webhook";if bash scripts/configure-telegram.sh;then co
 cat >/root/pasarguard-control-plane-credentials.txt <<EOF
 Install directory: $INSTALL_DIR
 WebApp: $WEBAPP_URL
-API docs: ${HTTPS}$DOMAIN/docs
+Metrics (header X-Metrics-Token): ${HTTPS}${DOMAIN}/metrics - set EXPOSE_DOCS=1 in .env to re-enable ${HTTPS}${DOMAIN}/docs
 Telegram administrator ID: $ROOT_TELEGRAM_ID
 CONTROL_API_KEY: $CONTROL_API_KEY
 INITIAL_SETUP_TOKEN: $INITIAL_SETUP_TOKEN

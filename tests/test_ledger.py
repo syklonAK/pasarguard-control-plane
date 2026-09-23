@@ -77,7 +77,7 @@ def test_balance_cannot_be_edited_without_ledger_write(session, make_org):
 
 
 def test_suspended_organization_cannot_be_billed(session, make_org):
-    from control_plane.app import Organization, transfer
+    from control_plane.app import transfer
 
     org = make_org(credit_limit_irr=1_000_000)
     session.execute(text("UPDATE organizations SET status='suspended' WHERE id=:id"), {"id": org.id})
@@ -89,7 +89,7 @@ def test_suspended_organization_cannot_be_billed(session, make_org):
 def test_settlement_cascades_profit_per_level(session, make_org, make_binding):
     from control_plane.domain import GIB
 
-    from control_plane.app import Organization, UsageIn, observe
+    from control_plane.app import UsageIn, observe
 
     root = make_org()
     middle = make_org(root, price_per_gib_irr=3000, credit_limit_irr=100_000)

@@ -1,6 +1,9 @@
 # PasarGuard B2B Control Plane
 
-Enterprise wholesale and reseller management for PasarGuard with usage billing, recursive reseller accounts, encrypted server credentials, Telegram Bot and Telegram WebApp.
+Enterprise wholesale and reseller management for PasarGuard: double-entry usage billing, recursive
+reseller accounts, encrypted panel credentials, six server-enforced roles, a Telegram Bot and a
+Telegram WebApp. Sized for 10,000 resellers and 1,000 concurrent operators; it is not a proxy and
+never sits in the subscriber data path.
 
 ## Product flow
 
@@ -8,54 +11,97 @@ Enterprise wholesale and reseller management for PasarGuard with usage billing, 
 2. Open the Telegram bot and tap **Open Panel**.
 3. Enter the one-time setup token shown after installation.
 4. Register PasarGuard servers from **WebApp → Servers**.
-5. Manage resellers, nodes, credit and billing from the WebApp. Server registration is not performed in the Linux terminal.
+5. Manage resellers, nodes, subscribers, credit and billing from the WebApp or the bot.
+   Server registration is never performed through terminal questions.
 
 ## One-command installation
 
-Requirements: Ubuntu 22.04/24.04 or Debian 12, a domain pointing to the server, ports 80/443, and a Telegram bot token.
+Requirements: Ubuntu 22.04/24.04 or Debian 12, a domain pointing at the server, ports 80/443 free,
+and a Telegram bot token. The installer asks for the root Telegram id and the bot token, installs
+Docker when missing, writes `.env` with mode `600`, and registers the webhook.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/main/install.sh | sudo bash
 ```
 
-All installer prompts and messages are in English. Existing `.env` secrets are preserved when the installer is rerun.
+All installer prompts are in English. Rerunning the installer preserves existing `.env` secrets and
+installs a nightly `pasarguard-backup.timer` that runs `scripts/backup.sh` (retention: `BACKUP_RETENTION`).
 
 ## First-time WebApp setup
-
-After installation, open the bot and tap **Open Panel**. Read the one-time token with:
 
 ```bash
 sudo grep INITIAL_SETUP_TOKEN /root/pasarguard-control-plane-credentials.txt
 ```
 
-Use the WebApp onboarding screen to create the root business. Then add PasarGuard panels from **Servers → Add server**. API keys and owner credentials are encrypted before database storage.
+Open the bot, tap **Open Panel**, and create the root business with that token. The bootstrap route
+accepts only `ROOT_TELEGRAM_ID` and only once. Then add PasarGuard panels from
+**Servers → Add server**; the API key and owner password are tested against the panel, encrypted
+with `APP_ENCRYPTION_KEY` (`enc://…` in the database), and never returned by any read endpoint.
 
-## Updates
+## Repository layout
 
-Do not reinstall. Run the local updater:
-
-```bash
-sudo bash /opt/pasarguard-control-plane/update.sh
+```text
+src/control_plane/
+  app.py                domain kernel: models, ledger, hierarchy, secrets, onboarding
+  api.py                machine API (/v1/…) guarded by X-Control-Key
+  web_api.py            human API (/v1/webapp/…) guarded by Telegram initData
+  rbac.py               the permission matrix; the only source of role truth
+  main.py               ASGI entrypoint: middleware, security headers, /health, /metrics
+  observability.py      structured JSON logs, rate limiting, Prometheus text exposition
+  telegram_gateway.py   webhook receiver: HMAC check, update_id dedupe, Redis Stream enqueue
+  telegram_consumer.py  bot menu worker (Redis consumer group), Persian replies
+  pasarguard.py         thin PasarGuard HTTP client (single place for every panel path)
+  outbox.py             at-least-once event delivery with backoff and dead-letter status
+  worker.py             billing poller: usage checkpoints, cascade settlement, holds
+  migrate.py            advisory-locked, idempotent migration runner
+webapp/                 Persian RTL Telegram WebApp (single page, capability-driven UI)
+migrations/             ordered SQL, applied on empty and existing databases alike
+scripts/                backup, restore, doctor, release-check, configure-telegram
+deploy/                 nginx and Caddy reverse-proxy configurations
+load/k6.js              10k-user / 1k-concurrent load profile
 ```
 
-It preserves `.env`, pulls the latest release, validates Compose, rebuilds changed services, runs tracked database migrations, checks the internal API and refreshes Telegram configuration.
+## Roles
 
-## Recover a previously interrupted installation
+`system_admin` (derived from `ROOT_TELEGRAM_ID`, never assignable), `reseller_admin`, `operator`,
+`finance`, `support`, `viewer`. Both the bot keyboard and the WebApp menus are built from
+`/v1/webapp/capabilities`; every route re-checks the same matrix on the server, and a refusal never
+reaches the panel. Correcting a settled balance requires a requester and an approver that are two
+different people, and only the system administrator may approve.
 
-```bash
-cd /opt/pasarguard-control-plane
-git pull --ff-only
-sudo bash update.sh
-```
+## Configuration
+
+`.env` is generated by the installer and documented in `.env.example`. The keys that change
+behaviour rather than credentials are `METRICS_TOKEN` (without it `/metrics` stays closed),
+`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_WRITE_PER_MINUTE`, `TRUST_PROXY_HEADERS` (only behind a proxy
+that rewrites `X-Forwarded-For`), `EXPOSE_DOCS`, `MAX_TREE_DEPTH`, `APPROVAL_TTL_SECONDS` and
+`BACKUP_RETENTION`.
 
 ## Operations
 
 ```bash
-sudo bash /opt/pasarguard-control-plane/scripts/doctor.sh
-sudo bash /opt/pasarguard-control-plane/scripts/backup.sh
-sudo bash /opt/pasarguard-control-plane/update.sh
+sudo bash /opt/pasarguard-control-plane/scripts/doctor.sh    # health, MIME, metrics, drift, outbox, stream lag
+sudo bash /opt/pasarguard-control-plane/scripts/backup.sh    # verified gzip dump + retention rotation
+sudo bash /opt/pasarguard-control-plane/scripts/restore.sh backups/control-YYYYmmdd-HHMMSS.sql.gz
+sudo bash /opt/pasarguard-control-plane/update.sh            # fast-forward pull, migrations, rebuild, webhook
 ```
 
-## Capacity
+`restore.sh` writes to a scratch database (`control_restore`) unless the operator passes
+`--into control --force`, which first takes a fresh safety backup of the live database.
+`update.sh` never rewrites `.env`, never drops volumes, and refuses to start when migrations fail.
+`uninstall.sh --purge-data` is the only path that removes data and it asks for confirmation;
+Docker itself is never removed.
 
-Defaults are safe for a 2-vCPU pilot server. A real 10,000-user production deployment requires staged load tests and larger PostgreSQL/API capacity. Before accepting real money, complete backup-restore drills, reconciliation, MFA/RBAC and approval workflows.
+## Verification
+
+```bash
+pip install -e .[test] && pytest -q      # real PostgreSQL via pgserver, ledger triggers included
+bash scripts/release-check.sh            # shell/python/JS syntax, compose YAML, secret scan
+node load/k6.js                          # documented k6 profile, see docs/CAPACITY-10K.md
+```
+
+Every money movement is a `Transaction` with balanced `Entry` rows; a database trigger rejects any
+write to a cached balance that is not made inside a ledger transaction, and `ledger_imbalance`
+exposes drift. Before accepting real money, complete a restore drill, reconciliation against a
+staging panel, and the approval workflow. See `docs/ARCHITECTURE.md`, `docs/ONBOARDING.md`,
+`docs/CAPACITY-10K.md` and `SECURITY.md`.

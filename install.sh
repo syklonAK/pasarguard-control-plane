@@ -29,7 +29,7 @@ else
  DOMAIN="${DOMAIN:-$(ask 'Public domain (example: panel.example.com)')}";[[ "$DOMAIN" == *.* ]] || die "Enter a valid domain."
  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$(ask_secret 'Telegram bot token')}";[[ "$TELEGRAM_BOT_TOKEN" == *:* ]] || die "Invalid Telegram bot token."
  ROOT_TELEGRAM_ID="${ROOT_TELEGRAM_ID:-$(ask 'Telegram administrator numeric ID')}";[[ "$ROOT_TELEGRAM_ID" =~ ^[0-9]{5,20}$ ]] || die "Invalid Telegram administrator numeric ID."
- POSTGRES_PASSWORD="$(random_hex 32)";CONTROL_API_KEY="$(random_hex 32)";TELEGRAM_WEBHOOK_SECRET="$(random_hex 32)";APP_ENCRYPTION_KEY="$(random_hex 32)";INITIAL_SETUP_TOKEN="$(random_hex 32)"
+ POSTGRES_PASSWORD="$(random_hex 32)";CONTROL_API_KEY="$(random_hex 32)";TELEGRAM_WEBHOOK_SECRET="$(random_hex 32)";APP_ENCRYPTION_KEY="$(random_hex 32)";INITIAL_SETUP_TOKEN="$(random_hex 32)";METRICS_TOKEN="$(random_hex 32)"
  cat>.env <<EOF
 DOMAIN=$DOMAIN
 WEBAPP_URL=${HTTPS}${DOMAIN}/app/
@@ -41,8 +41,12 @@ ROOT_TELEGRAM_ID=$ROOT_TELEGRAM_ID
 TELEGRAM_WEBHOOK_SECRET=$TELEGRAM_WEBHOOK_SECRET
 APP_ENCRYPTION_KEY=$APP_ENCRYPTION_KEY
 INITIAL_SETUP_TOKEN=$INITIAL_SETUP_TOKEN
+METRICS_TOKEN=$METRICS_TOKEN
 REDIS_URL=redis://redis:6379/0
 USAGE_POLL_SECONDS=30
+LOG_LEVEL=INFO
+RATE_LIMIT_PER_MINUTE=300
+RATE_LIMIT_WRITE_PER_MINUTE=120
 DB_POOL_SIZE=10
 DB_MAX_OVERFLOW=20
 DB_POOL_TIMEOUT=10
@@ -59,11 +63,11 @@ fi
 set -a;source .env;set +a
 ensure_env(){ grep -q "^$1=" .env || printf '%s=%s\n' "$1" "$2" >>.env; }
 if [[ ! "${ROOT_TELEGRAM_ID:-}" =~ ^[0-9]{5,20}$ ]];then ROOT_TELEGRAM_ID="$(ask 'Telegram administrator numeric ID')";[[ "$ROOT_TELEGRAM_ID" =~ ^[0-9]{5,20}$ ]] || die "Invalid Telegram administrator numeric ID.";fi
-ensure_env ROOT_TELEGRAM_ID "$ROOT_TELEGRAM_ID";ensure_env WEBAPP_URL "${HTTPS}${DOMAIN}/app/";ensure_env APP_ENCRYPTION_KEY "$(random_hex 32)";ensure_env INITIAL_SETUP_TOKEN "$(random_hex 32)";ensure_env POSTGRES_CPU_LIMIT 1.0;ensure_env POSTGRES_MEMORY_LIMIT 2G;ensure_env API_CPU_LIMIT 0.75;ensure_env API_MEMORY_LIMIT 1G;ensure_env API_REPLICAS 1;ensure_env API_WORKERS 1;ensure_env TELEGRAM_CONSUMER_REPLICAS 1
+ensure_env ROOT_TELEGRAM_ID "$ROOT_TELEGRAM_ID";ensure_env WEBAPP_URL "${HTTPS}${DOMAIN}/app/";ensure_env APP_ENCRYPTION_KEY "$(random_hex 32)";ensure_env INITIAL_SETUP_TOKEN "$(random_hex 32)";ensure_env METRICS_TOKEN "$(random_hex 32)";ensure_env LOG_LEVEL INFO;ensure_env RATE_LIMIT_PER_MINUTE 300;ensure_env RATE_LIMIT_WRITE_PER_MINUTE 120;ensure_env POSTGRES_CPU_LIMIT 1.0;ensure_env POSTGRES_MEMORY_LIMIT 2G;ensure_env API_CPU_LIMIT 0.75;ensure_env API_MEMORY_LIMIT 1G;ensure_env API_REPLICAS 1;ensure_env API_WORKERS 1;ensure_env TELEGRAM_CONSUMER_REPLICAS 1
 set -a;source .env;set +a
 configure_telegram(){
  curl -fsS "${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/setWebhook" --data-urlencode "url=${HTTPS}${DOMAIN}/telegram/webhook" --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" >/dev/null
- local commands command_payload menu_payload;commands='[{"command":"start","description":"باز کردن منوی اختصاصی"},{"command":"id","description":"نمایش شناسه عددی تلگرام"},{"command":"dashboard","description":"نمایش داشبورد"},{"command":"servers","description":"مدیریت سرورها و نودها"},{"command":"support","description":"راهنما و پشتیبانی"}]'
+ local commands command_payload menu_payload;commands='[{"command":"start","description":"باز کردن منوی اختصاصی"},{"command":"menu","description":"نمایش منوی نقش شما"},{"command":"id","description":"نمایش شناسه عددی تلگرام"},{"command":"dashboard","description":"نمایش داشبورد"},{"command":"servers","description":"مدیریت سرورها و نودها"},{"command":"support","description":"راهنما و پشتیبانی"},{"command":"cancel","description":"لغو فرم جاری"}]'
  command_payload="$(jq -nc --argjson commands "$commands" '{commands:$commands}')";curl -fsS "${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" -H 'Content-Type: application/json' -d "$command_payload" >/dev/null
  menu_payload="$(jq -nc --arg url "$WEBAPP_URL" '{menu_button:{type:"web_app",text:"پنل مدیریت",web_app:{url:$url}}}')";curl -fsS "${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/setChatMenuButton" -H 'Content-Type: application/json' -d "$menu_payload" >/dev/null
 }
@@ -75,10 +79,33 @@ info "Waiting for the internal API"
 for _ in $(seq 1 120);do API_CID="$(docker compose "${COMPOSE[@]}" ps -q api|head -n1)";if [[ -n "$API_CID" ]]&&docker exec "$API_CID" python -c 'import urllib.request;urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=2)' >/dev/null 2>&1;then INTERNAL_READY=1;break;fi;sleep 2;done
 if [[ "${INTERNAL_READY:-0}" != 1 ]];then warn "API health check failed.";docker compose "${COMPOSE[@]}" ps;docker compose "${COMPOSE[@]}" logs --tail=80 api >&2 || true;exit 1;fi
 if curl -fsS --max-time 10 "${HTTPS}${DOMAIN}/health" >/dev/null 2>&1;then info "Configuring Telegram webhook and menu";configure_telegram;else warn "The internal API is healthy, but public HTTPS is unavailable. Check DNS and ports 80/443, then run update.sh.";fi
+info "Installing the nightly backup timer"
+if command -v systemctl >/dev/null;then
+cat >/etc/systemd/system/pasarguard-backup.service <<EOF
+[Unit]
+Description=PasarGuard control plane database backup
+[Service]
+Type=oneshot
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/bin/env bash $INSTALL_DIR/scripts/backup.sh
+EOF
+cat >/etc/systemd/system/pasarguard-backup.timer <<EOF
+[Unit]
+Description=Nightly PasarGuard control plane backup
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=15m
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload;systemctl enable --now pasarguard-backup.timer
+info "Nightly backup timer installed"
+else warn "systemd is unavailable; schedule scripts/backup.sh yourself.";fi
 cat >/root/pasarguard-control-plane-credentials.txt <<EOF
 Install directory: $INSTALL_DIR
 WebApp: $WEBAPP_URL
-API docs: ${HTTPS}$DOMAIN/docs
+Metrics (header X-Metrics-Token): ${HTTPS}${DOMAIN}/metrics - set EXPOSE_DOCS=1 in .env to re-enable ${HTTPS}${DOMAIN}/docs
 Telegram administrator ID: $ROOT_TELEGRAM_ID
 CONTROL_API_KEY: $CONTROL_API_KEY
 INITIAL_SETUP_TOKEN: $INITIAL_SETUP_TOKEN

@@ -1,13 +1,12 @@
 """Outbox delivery: hold policy, retry/backoff, dedupe and stale claim recovery."""
 from __future__ import annotations
 
-from datetime import timedelta
 
 import pytest
 from sqlalchemy import func, select, text
 
 from control_plane import outbox
-from control_plane.app import Binding, Checkpoint, Outbox, Usage, UsageIn, observe
+from control_plane.app import Binding, Outbox, Usage, UsageIn, observe
 from control_plane.domain import GIB
 
 

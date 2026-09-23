@@ -1,20 +1,30 @@
-name: quality
+name: CI
 on:
   push:
-    branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
-  test:
+  static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
+        with: {python-version: "3.13"}
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: {node-version: "22"}
       - run: python -m pip install --upgrade pip
-      - run: pip install -e . pytest PyYAML
+      - run: pip install -e . PyYAML pyflakes
       - run: bash scripts/release-check.sh
+  test:
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      # The suite runs against an embedded PostgreSQL, so migrations and ledger triggers
+      # are proven on the same SQL behavior production gets.
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .[test]
       - run: pytest -q

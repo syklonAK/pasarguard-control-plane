@@ -9,11 +9,12 @@ import pytest
 from sqlalchemy import select, text
 
 from conftest import API_KEY_HEADERS, as_user
-from control_plane import pasarguard, v04_app
-from control_plane.app import Panel
+from control_plane import pasarguard, web_api
+from control_plane.app import Organization, Panel
 from control_plane.secrets import resolve_secret
 
 ROOT_ID = 100001
+STAFF_ID = 300007
 API_KEY = "super-secret-panel-key"
 OWNER_PASSWORD = "owner-password-value"
 
@@ -48,7 +49,7 @@ class FakePanel:
 @pytest.fixture
 def fake_panel(monkeypatch):
     recorded = []
-    monkeypatch.setattr(v04_app, "Client", FakePanel(recorded))
+    monkeypatch.setattr(web_api, "Client", FakePanel(recorded))
     return recorded
 
 
@@ -93,15 +94,30 @@ def test_registration_refuses_secret_references_and_unknown_fields(client, sessi
     assert session.scalar(text("SELECT count(*) FROM panels")) == 0
 
 
-def test_tls_verification_cannot_be_disabled_from_any_entry_point(client, fake_panel):
-    assert _register(client, verify_tls=False).status_code == 422
+def test_tls_verification_is_an_explicit_root_only_choice(client, session, fake_panel):
+    # Verification is the default; opting out is a root decision, it is audited and never silent.
+    assert _register(client).status_code == 200 and fake_panel[-1]["verify_tls"] is True
     plain = client.post(
         "/v1/panels",
         headers=API_KEY_HEADERS,
         json={"name": "Plain", "base_url": "http://panel.example.test", "api_key_ref": "env://PANEL_KEY"},
     )
     assert plain.status_code == 422
-    assert plain.status_code != 401
+    client.post("/v1/admin/actor-bindings", headers=API_KEY_HEADERS,
+                json={"telegram_id": STAFF_ID, "organization_id": session.scalar(select(Organization.id)),
+                      "display_name": "Staff", "role": "reseller_admin"})
+    refused = client.post("/v1/webapp/panels", headers=as_user(STAFF_ID),
+                          json={"name": "Staff panel", "base_url": "https://staff.example.test",
+                                "api_key": "staff-panel-key", "verify_tls": False})
+    assert refused.status_code == 403, refused.text
+    assert session.scalar(text("SELECT count(*) FROM panels WHERE base_url='https://staff.example.test'")) == 0
+    allowed = client.post("/v1/webapp/panels", headers=as_user(ROOT_ID),
+                          json={"name": "Lab panel", "base_url": "https://lab.example.test",
+                                "api_key": "root-panel-key", "verify_tls": False})
+    assert allowed.status_code == 200, allowed.text
+    assert fake_panel[-1]["verify_tls"] is False
+    assert session.scalar(
+        text("SELECT count(*) FROM audit_logs WHERE action='panel.create' AND metadata->>'verify_tls'='false'")) == 1
 
 
 def test_control_api_cannot_write_without_the_key(client, session):

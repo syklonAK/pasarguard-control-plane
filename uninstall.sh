@@ -63,6 +63,13 @@ if [[ $ASSUME_YES -ne 1 ]]; then
 fi
 
 COMPOSE=(-f docker-compose.enterprise.yml -f docker-compose.production.yml)
+if command -v systemctl >/dev/null; then
+  info "Removing the nightly backup timer"
+  systemctl disable --now pasarguard-backup.timer >/dev/null 2>&1 || true
+  systemctl reset-failed pasarguard-backup.timer pasarguard-backup.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/pasarguard-backup.timer /etc/systemd/system/pasarguard-backup.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
   info "Stopping services"
   if [[ -f docker-compose.enterprise.yml && -f docker-compose.production.yml ]]; then

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from conftest import as_user
-from control_plane import telegram_consumer, v04_app
+from control_plane import telegram_consumer, web_api
 
 ROOT_ID = 100001
 API_KEY = "bot-panel-key"
@@ -50,7 +50,7 @@ class FakePanel:
 @pytest.fixture
 def fake_panel(monkeypatch):
     recorded = []
-    monkeypatch.setattr(v04_app, "Client", FakePanel(recorded))
+    monkeypatch.setattr(web_api, "Client", FakePanel(recorded))
     return recorded
 
 
@@ -121,7 +121,7 @@ def test_a_panel_owned_by_someone_else_is_invisible(client, session, bot_panel, 
 
 def test_upstream_credentials_failure_becomes_a_persian_permission_error(client, session, bot_panel, monkeypatch):
     recorded = []
-    monkeypatch.setattr(v04_app, "Client", FakePanel(recorded, failure=401))
+    monkeypatch.setattr(web_api, "Client", FakePanel(recorded, failure=401))
     with pytest.raises(PermissionError) as caught:
         telegram_consumer.node_action(ROOT_ID, bot_panel, "3", "reconnect")
     assert caught.value.args[0] == "اعتبارنامهٔ ذخیره‌شده در PasarGuard پذیرفته نشد"

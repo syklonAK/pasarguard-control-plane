@@ -1,7 +1,6 @@
 """Panel operations must be audited, permission-checked, and free of upstream leakage."""
 from __future__ import annotations
 
-import json
 import os
 
 import httpx
@@ -9,7 +8,7 @@ import pytest
 from sqlalchemy import select, text
 
 from conftest import as_user
-from control_plane import v04_app
+from control_plane import web_api
 from control_plane.app import Panel
 
 ROOT_ID = 100001
@@ -50,6 +49,9 @@ class FakePanel:
     def reconnect_node(self, node_id):
         return self._call("reconnect_node", node_id)
 
+    def reset_node(self, node_id):
+        return self._call("reset_node", node_id)
+
     def users(self, admin_id, offset=0, limit=50):
         self._call("users", admin_id, offset, limit)
         return {"users": [{"id": 9, "status": "active"}], "total": 1}
@@ -67,7 +69,7 @@ class FakePanel:
 @pytest.fixture
 def fake_panel(monkeypatch):
     recorded = []
-    monkeypatch.setattr(v04_app, "Client", FakePanel(recorded))
+    monkeypatch.setattr(web_api, "Client", FakePanel(recorded))
     return recorded
 
 
@@ -110,6 +112,13 @@ def test_node_status_and_listing_are_reads_not_mutations(client, session, panel,
 def test_unknown_toggle_words_never_reach_the_panel(client, panel, fake_panel):
     assert client.post(f"/v1/webapp/panels/{panel}/nodes/5/banana", headers=as_user(ROOT_ID)).status_code == 422
     assert [c for c in fake_panel if "op" in c] == []
+
+
+def test_node_reset_has_its_own_route_and_is_audited(client, session, panel, fake_panel):
+    response = client.post(f"/v1/webapp/panels/{panel}/nodes/5/reset", headers=as_user(ROOT_ID))
+    assert response.status_code == 200, response.text
+    assert [c["op"] for c in fake_panel if "op" in c] == ["reset_node"]
+    assert session.scalar(text("SELECT count(*) FROM audit_logs WHERE action='node.reset'")) == 1
 
 
 def test_user_reset_data_is_not_shadowed_by_the_toggle_route(client, session, panel, fake_panel):
@@ -157,7 +166,7 @@ def test_a_foreign_organization_cannot_drive_another_panels_server(client, sessi
 @pytest.mark.parametrize("status_code", [401, 403])
 def test_rejected_credentials_are_reported_without_the_url(client, session, panel, monkeypatch, status_code):
     recorded = []
-    monkeypatch.setattr(v04_app, "Client", FakePanel(recorded, failure=status_code))
+    monkeypatch.setattr(web_api, "Client", FakePanel(recorded, failure=status_code))
     response = client.post(f"/v1/webapp/panels/{panel}/nodes/5/reconnect", headers=as_user(ROOT_ID))
     assert response.status_code == 502
     assert response.json()["detail"] == "اعتبارنامهٔ ذخیره‌شده در PasarGuard پذیرفته نشد"
@@ -173,7 +182,7 @@ def test_an_unreachable_panel_never_echoes_the_exception(client, session, panel,
             self.recorded.append({"op": "reconnect_node", "args": (node_id,)})
             raise httpx.ConnectError(f"failed to connect to {URL}")
 
-    monkeypatch.setattr(v04_app, "Client", Down(recorded))
+    monkeypatch.setattr(web_api, "Client", Down(recorded))
     response = client.post(f"/v1/webapp/panels/{panel}/nodes/5/reconnect", headers=as_user(ROOT_ID))
     assert response.status_code == 502 and response.json()["detail"] == "اتصال به PasarGuard برقرار نشد"
     assert URL not in response.text

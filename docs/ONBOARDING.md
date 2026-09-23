@@ -1,12 +1,23 @@
-# Web-first onboarding
+# راه‌اندازی از طریق وب‌اپ
 
-Server registration does not happen in the Linux terminal.
+ثبت سرور پاسارگارد از ترمینال و از طریق سؤال‌های متنی انجام نمی‌شود.
 
-1. The installer deploys infrastructure and generates a one-time setup token.
-2. The owner opens the Telegram WebApp and creates the root business with that token.
-3. The owner opens **Servers → Add server** and enters the PasarGuard HTTPS URL and API key.
-4. The API verifies connectivity before saving anything.
-5. Credentials are encrypted with the application master key and are never returned to the browser.
-6. Nodes are loaded live from PasarGuard and reconnect commands are issued from the WebApp.
+1. نصب‌کننده زیرساخت را بالا می‌آورد، webhook تلگرام را ثبت می‌کند و یک توکن یک‌بارمصرف تولید می‌کند.
+2. مدیر اصلی بات را باز می‌کند، روی **Open Panel** می‌زند و با `/id` شناسه عددی خود را می‌بیند.
+3. با همان شناسه (که در `ROOT_TELEGRAM_ID` تنظیم شده) صفحهٔ راه‌اندازی را باز و فضای کاری ریشه را
+   با `INITIAL_SETUP_TOKEN` می‌سازد. این مرحله فقط یک‌بار و فقط برای همان شناسه ممکن است.
+4. از **سرورها → ثبت سرور** آدرس HTTPS، کلید API و در صورت نیاز نام کاربری و رمز مالک وارد می‌شود.
+5. سرور پیش از ذخیره‌شدن با یک فراخوانی واقعی آزموده می‌شود؛ پاسخ ناموفق، هیچ داده‌ای نمی‌نویسد و
+   هیچ رازی را به مرورگر یا لاگ برنمی‌گرداند.
+6. رازها با کلید اصلی برنامه رمزنگاری (`enc://`) می‌شوند. اعتبارسنجی گواهی TLS به‌صورت پیش‌فرض
+   روشن است و فقط مدیر کل سیستم و با هشدار قابل خاموش‌کردن است.
+7. نودها و مشترکان به‌صورت زنده از پنل خوانده می‌شوند؛ روشن/خاموش، اتصال مجدد، بازنشانی نود،
+   فعال/غیرفعال کردن مشترک و پاک‌کردن مصرف همه از همین صفحه و با کنترل مجوز در سرور انجام می‌شود.
+8. از **نمایندگان** می‌توان برای هر کاربر نقش `reseller_admin`، `operator`، `finance`، `support` یا
+   `viewer` بست. منوی بات و منوی وب‌اپ هر دو از `/v1/webapp/capabilities` ساخته می‌شوند، اما سرور در
+   هر درخواست دوباره ماتریس را بررسی می‌کند.
+9. درخواست‌های مالی نماینده در **امور مالی** مدیر والد (و برای ریشه، مدیر کل) نمایش داده می‌شود؛
+   تأیید موجودی را زنجیره‌ای در همهٔ سطوح والد تسویه می‌کند. اصلاح حساب نیاز به تأیید جدا دارد.
 
-The terminal is limited to infrastructure installation, diagnostics, backups and updates.
+ترمینال فقط برای نصب زیرساخت، عیب‌یابی، پشتیبان و به‌روزرسانی است:
+`scripts/doctor.sh`، `scripts/backup.sh`، `scripts/restore.sh`، `update.sh`.

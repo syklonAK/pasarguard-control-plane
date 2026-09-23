@@ -1,16 +1,17 @@
 from __future__ import annotations
-import hmac, json, os
+import hmac, os
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID, insert as pg_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from .domain import cascade
 from .migrate import run_migrations
+from .rbac import can, denial_fa, normalize
 
 def uid(): return str(uuid4())
 def now(): return datetime.now(timezone.utc)
@@ -160,18 +161,7 @@ class ApprovalRequest(Base):
     decided_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); decision_note:Mapped[str|None]=mapped_column(Text)
     created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
 
-class OrgIn(BaseModel):
-    name:str=Field(min_length=2,max_length=160); slug:str=Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$")
-    parent_id:str|None=None; price_per_gib_irr:int|None=Field(default=None,ge=0); credit_limit_irr:int=Field(default=0,ge=0)
-class FundIn(BaseModel): amount_irr:int=Field(gt=0); idempotency_key:str=Field(min_length=8,max_length=180)
 class UsageIn(BaseModel): binding_id:str; lifetime_bytes:int=Field(ge=0); observed_at:datetime
-class PanelIn(BaseModel):
-    # Secrets are never accepted as plain references over HTTP; register a server through the
-    # authenticated WebApp so it can be encrypted server-side.
-    model_config=ConfigDict(extra="forbid")
-    name:str=Field(min_length=2,max_length=120); base_url:str=Field(min_length=10,max_length=500)
-    usage_coefficient:Decimal=Field(default=Decimal("1"),gt=Decimal("0"),le=Decimal("1000"))
-class BindingIn(BaseModel): organization_id:str; panel_id:str; pg_admin_id:int; username:str
 
 def db():
     s=SessionLocal()
@@ -296,75 +286,8 @@ async def lifespan(_app:FastAPI):
     Base.metadata.create_all(ENGINE)
     run_migrations(ENGINE)
     yield
-app=FastAPI(title="PasarGuard B2B Control Plane",version="0.8.0",lifespan=lifespan)
-@app.get("/health")
-def health():return {"status":"ok","time":now()}
-@app.post("/v1/organizations",dependencies=[Depends(auth)])
-def create_org(x:OrgIn,s:Session=Depends(db)):
-    if s.scalar(select(Organization.id).where(Organization.slug==x.slug)):raise HTTPException(409,"slug exists")
-    parent=s.get(Organization,x.parent_id) if x.parent_id else None
-    if x.parent_id and not parent:raise HTTPException(404,"parent not found")
-    if parent and x.price_per_gib_irr is None:raise HTTPException(422,"child price required")
-    if parent:assert_depth_allowed(s,parent)
-    o=Organization(name=x.name,slug=x.slug,parent_id=x.parent_id,credit_limit_irr=x.credit_limit_irr);s.add(o);s.flush();s.add(Closure(ancestor_id=o.id,descendant_id=o.id,depth=0))
-    if parent:
-        for e in s.scalars(select(Closure).where(Closure.descendant_id==parent.id)).all():s.add(Closure(ancestor_id=e.ancestor_id,descendant_id=o.id,depth=e.depth+1))
-        s.add(Contract(parent_id=parent.id,child_id=o.id,price_per_gib_irr=x.price_per_gib_irr))
-    account(s,o.id);audit(s,"organization.create","organization",o.id,organization_id=o.id,metadata={"slug":o.slug,"parent_id":o.parent_id});s.commit();return {"id":o.id,"name":o.name,"parent_id":o.parent_id}
-@app.get("/v1/organizations",dependencies=[Depends(auth)])
-def list_orgs(s:Session=Depends(db)):return [{"id":o.id,"name":o.name,"parent_id":o.parent_id,"status":o.status} for o in s.scalars(select(Organization)).all()]
-@app.post("/v1/organizations/{org_id}/fund",dependencies=[Depends(auth)])
-def fund(org_id:str,x:FundIn,s:Session=Depends(db)):
-    if not s.get(Organization,org_id):raise HTTPException(404,"organization not found")
-    tx=transfer(s,"SYSTEM",org_id,x.amount_irr,x.idempotency_key,"fund",org_id,False);audit(s,"wallet.fund","transaction",tx.id,organization_id=org_id,metadata={"amount_irr":x.amount_irr,"idempotency_key":x.idempotency_key});s.commit();return {"transaction_id":tx.id,"balance_irr":balance(s,org_id)}
-@app.get("/v1/organizations/{org_id}/wallet",dependencies=[Depends(auth)])
-def wallet(org_id:str,s:Session=Depends(db)):
-    o=s.get(Organization,org_id)
-    if not o:raise HTTPException(404,"organization not found")
-    b=balance(s,org_id);return {"balance_irr":b,"credit_limit_irr":o.credit_limit_irr,"available_irr":b+o.credit_limit_irr}
-@app.post("/v1/panels",dependencies=[Depends(auth)])
-def panel(x:PanelIn,s:Session=Depends(db)):
-    url=x.base_url.rstrip("/")
-    validate_panel_url(url)
-    p=Panel(name=x.name,base_url=url,usage_coefficient=x.usage_coefficient,verify_tls=True)
-    s.add(p);audit(s,"panel.create","panel",p.id,metadata={"base_url":url,"usage_coefficient":str(x.usage_coefficient)});s.commit();return {"id":p.id,"name":p.name}
-@app.post("/v1/bindings",dependencies=[Depends(auth)])
-def binding(x:BindingIn,s:Session=Depends(db)):
-    if not s.get(Organization,x.organization_id) or not s.get(Panel,x.panel_id):raise HTTPException(404,"org/panel not found")
-    b=Binding(**x.model_dump());s.add(b);audit(s,"binding.create","binding",b.id,organization_id=x.organization_id,metadata={"panel_id":x.panel_id,"pg_admin_id":x.pg_admin_id});s.commit();return {"id":b.id}
-@app.post("/v1/internal/usage",dependencies=[Depends(auth)])
-def usage(x:UsageIn,s:Session=Depends(db)):
-    try:r=observe(s,x);s.commit();return {"settlements":r}
-    except BillingHold as e:
-        s.rollback();record_hold(s,e.binding_id,e.organization_id,e.amount_irr);s.commit();raise HTTPException(402,str(e))
-    except ValueError as e:s.rollback();raise HTTPException(409,str(e))
-
-class UsageBatchIn(BaseModel):
-    observations:list[UsageIn]=Field(min_length=1,max_length=1000)
-
-@app.post("/v1/internal/usage/batch",dependencies=[Depends(auth)])
-def usage_batch(x:UsageBatchIn,s:Session=Depends(db)):
-    results=[];holds=[]
-    for item in x.observations:
-        try:results.append({"binding_id":item.binding_id,"settlements":observe(s,item)})
-        except BillingHold as e:
-            holds.append({"binding_id":e.binding_id,"organization_id":e.organization_id});record_hold(s,e.binding_id,e.organization_id,e.amount_irr)
-    if holds and not results:
-        s.commit();raise HTTPException(402,"billing hold recorded")
-    s.commit()
-    return {"processed":len(results),"holds":holds,"results":results}
 
 from .telegram_auth import TelegramAuthError, verify_init_data
-
-class ActorBindIn(BaseModel):
-    telegram_id:int
-    display_name:str=Field(default="",max_length=160)
-    organization_id:str
-    role:str=Field(default="reseller_admin",pattern=r"^(reseller_admin|operator|finance|viewer)$")
-class FundingRequestIn(BaseModel): amount_irr:int=Field(gt=0,le=10_000_000_000_000)
-class WebChildIn(BaseModel):
-    name:str=Field(min_length=2,max_length=160);slug:str=Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$")
-    price_per_gib_irr:int=Field(gt=0);credit_limit_irr:int=Field(default=0,ge=0)
 
 def web_identity(x_telegram_init_data:str=Header(default="")):
     try:return verify_init_data(x_telegram_init_data,os.environ.get("TELEGRAM_BOT_TOKEN",""),max_age_seconds=3600)
@@ -385,46 +308,25 @@ def membership_for(s:Session,telegram_id:int):
     if not membership:raise HTTPException(403,"active membership not found")
     return actor,membership,s.get(Organization,membership.organization_id)
 
-@app.post("/v1/admin/actor-bindings",dependencies=[Depends(auth)])
-def bind_actor(x:ActorBindIn,s:Session=Depends(db)):
-    if not s.get(Organization,x.organization_id):raise HTTPException(404,"organization not found")
-    actor=s.scalar(select(Actor).where(Actor.telegram_id==x.telegram_id))
-    if not actor:actor=Actor(telegram_id=x.telegram_id,display_name=x.display_name);s.add(actor);s.flush()
-    m=s.scalar(select(Membership).where(Membership.organization_id==x.organization_id,Membership.actor_id==actor.id))
-    if not m:s.add(Membership(organization_id=x.organization_id,actor_id=actor.id,role=x.role))
-    audit(s,"actor.bind","actor",actor.id,organization_id=x.organization_id,metadata={"telegram_id":x.telegram_id,"role":x.role})
-    s.commit();return {"actor_id":actor.id,"organization_id":x.organization_id}
+def configured_root_id()->int|None:
+    value=os.getenv("ROOT_TELEGRAM_ID","")
+    return int(value) if value.isdigit() else None
 
-@app.get("/v1/webapp/dashboard")
-def web_dashboard(identity=Depends(web_identity),s:Session=Depends(db)):
-    actor,m,o=membership_for(s,identity.user_id);wallet=balance(s,o.id)
-    children=int(s.scalar(select(func.count()).select_from(Organization).where(Organization.parent_id==o.id)) or 0)
-    binding=s.scalar(select(Binding).where(Binding.organization_id==o.id))
-    cp=s.get(Checkpoint,binding.id) if binding else None
-    return {"actor":{"name":actor.display_name,"role":m.role},"organization":{"id":o.id,"name":o.name,"status":o.status},"wallet":{"balance_irr":wallet,"credit_limit_irr":o.credit_limit_irr,"available_irr":wallet+o.credit_limit_irr},"usage":{"lifetime_bytes":cp.lifetime_bytes if cp else 0,"observed_at":cp.observed_at if cp else None},"children_count":children}
-@app.get("/v1/webapp/children")
-def web_children(identity=Depends(web_identity),s:Session=Depends(db)):
-    _,_,o=membership_for(s,identity.user_id)
-    rows=s.scalars(select(Organization).where(Organization.parent_id==o.id).order_by(Organization.created_at.desc()).limit(100)).all()
-    return [{"id":x.id,"name":x.name,"status":x.status,"balance_irr":balance(s,x.id),"credit_limit_irr":x.credit_limit_irr} for x in rows]
-@app.post("/v1/webapp/children")
-def web_create_child(x:WebChildIn,identity=Depends(web_identity),s:Session=Depends(db)):
-    actor,m,parent=membership_for(s,identity.user_id)
-    if m.role not in ("reseller_admin","operator"):raise HTTPException(403,"role cannot create child")
-    if s.scalar(select(Organization.id).where(Organization.slug==x.slug)):raise HTTPException(409,"slug exists")
-    assert_depth_allowed(s,parent)
-    child=Organization(name=x.name,slug=x.slug,parent_id=parent.id,credit_limit_irr=x.credit_limit_irr);s.add(child);s.flush();s.add(Closure(ancestor_id=child.id,descendant_id=child.id,depth=0))
-    for edge in s.scalars(select(Closure).where(Closure.descendant_id==parent.id)).all():s.add(Closure(ancestor_id=edge.ancestor_id,descendant_id=child.id,depth=edge.depth+1))
-    s.add(Contract(parent_id=parent.id,child_id=child.id,price_per_gib_irr=x.price_per_gib_irr));account(s,child.id)
-    audit(s,"organization.create","organization",child.id,actor_id=actor.id,organization_id=parent.id,metadata={"slug":child.slug,"price_per_gib_irr":x.price_per_gib_irr})
-    s.commit();return {"id":child.id,"name":child.name}
-@app.get("/v1/webapp/transactions")
-def web_transactions(identity=Depends(web_identity),s:Session=Depends(db)):
-    _,_,o=membership_for(s,identity.user_id);a=account(s,o.id)
-    rows=s.execute(select(Transaction,Entry).join(Entry,Entry.transaction_id==Transaction.id).where(Entry.account_id==a.id).order_by(Transaction.created_at.desc()).limit(50)).all()
-    return [{"id":tx.id,"kind":tx.kind,"amount_irr":entry.amount_irr,"side":entry.side,"created_at":tx.created_at} for tx,entry in rows]
-@app.post("/v1/webapp/funding-requests")
-def web_funding_request(x:FundingRequestIn,identity=Depends(web_identity),s:Session=Depends(db)):
-    actor,_,o=membership_for(s,identity.user_id);req=FundingRequest(organization_id=o.id,actor_id=actor.id,amount_irr=x.amount_irr);s.add(req)
-    audit(s,"funding_request.create","funding_request",req.id,actor_id=actor.id,organization_id=o.id,metadata={"amount_irr":x.amount_irr})
-    s.commit();return {"id":req.id,"status":req.status}
+def effective_role(telegram_id:int,membership_role:str|None)->str:
+    """The root Telegram identity is the only source of the system_admin role."""
+    root=configured_root_id()
+    if root is not None and telegram_id==root:return "system_admin"
+    return normalize(membership_role)
+
+def role_for(s:Session,telegram_id:int)->str:
+    _,membership,_=membership_for(s,telegram_id)
+    return effective_role(telegram_id,membership.role)
+
+def require_permission(permission:str):
+    """FastAPI dependency resolving the caller's role server-side on every request."""
+    def dependency(identity=Depends(web_identity),s:Session=Depends(db)):
+        actor,membership,organization=membership_for(s,identity.user_id)
+        role=effective_role(identity.user_id,membership.role)
+        if not can(role,permission):raise HTTPException(403,denial_fa(permission))
+        return actor,membership,organization,role
+    return dependency

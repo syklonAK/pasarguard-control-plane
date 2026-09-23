@@ -35,6 +35,10 @@ os.environ.update(
     WEBAPP_URL="https://panel.example.test/app/",
     REDIS_URL="redis://127.0.0.1:6379/0",
     USAGE_COEFFICIENT="1",
+    METRICS_TOKEN="m" * 32,
+    # The guard rails are exercised on their own; the suite must not trip over them.
+    RATE_LIMIT_WRITE_PER_MINUTE="100000",
+    RATE_LIMIT_PER_MINUTE="100000",
 )
 
 API_KEY_HEADERS = {"X-Control-Key": os.environ["CONTROL_API_KEY"]}
@@ -91,8 +95,10 @@ def session(engine):
 def client(engine):
     from fastapi.testclient import TestClient
 
-    from control_plane.root_guard_app import app
+    from control_plane.main import app
+    from control_plane.observability import anon_limiter, write_limiter
 
+    write_limiter.reset(); anon_limiter.reset()
     with TestClient(app) as test_client:
         test_client.headers.update(API_KEY_HEADERS)
         yield test_client

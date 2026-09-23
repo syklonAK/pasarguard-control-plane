@@ -1,9 +1,66 @@
-# Architecture
+# معماری
+
 PasarGuard منبع وضعیت فنی و مصرف است؛ Control Plane منبع پول، قیمت، مالکیت و سلسله‌مراتب.
+هیچ درخواست مشترک از کنار Control Plane نمی‌گذرد؛ این سرویس فقط فرمان، صورتحساب و رویداد پردازش می‌کند.
 
 ```text
-control-api ─┬─ PostgreSQL (hierarchy + ledger + contracts)
-             ├─ worker-billing ─ PasarGuard API
-             └─ telegram-gateway
+Telegram ──webhook──> telegram_gateway ──Redis Stream──> telegram_consumer (بات)
+                                                     └──> web_api (/v1/webapp) <── WebApp
+                                          │
+                       api (/v1, X-Control-Key)
+                                          │
+   PostgreSQL (ledger + hierarchy + contracts + outbox) <── worker (billing) ──> PasarGuard
 ```
-هر نماینده یک Organization و یک PasarGuard Admin binding دارد. درخت در Control Plane نگهداری می‌شود و PasarGuard نیازی به پشتیبانی native از زیرشاخه ندارد.
+
+## ماژول‌ها
+
+| ماژول | مسئولیت |
+|---|---|
+| `app.py` | هستهٔ دامنه: مدل‌ها، دفتر دوشکلو، قفل ردیف، درخت closure، رمزنگاری رازها، bootstrap |
+| `api.py` | API ماشینی با هدر `X-Control-Key` برای سرویس‌های داخلی |
+| `web_api.py` | API انسانی مبتنی بر `initData` تلگرام؛ همهٔ تصمیم‌های دسترسی اینجا گرفته می‌شود |
+| `rbac.py` | ماتریس مجوزها؛ تنها مرجع نقش‌ها برای بات و وب‌اپ |
+| `main.py` | ورودی ASGI، میدل‌ور، هدرهای امنیتی، `/health`، `/metrics` |
+| `observability.py` | لاگ JSON، محدودساز نرخ، متریکس Prometheus بدون وابستگی |
+| `telegram_gateway.py` | بررسی `secret_token`، حذف تکراری‌ها با `update_id`، صف‌گذاری در Redis Stream |
+| `telegram_consumer.py` | منوی بات، پاسخ سریع callback، فرم‌های stateless با TTL |
+| `pasarguard.py` | تنها نقطهٔ تماس با پنل: مسیرها، `X-Api-Key`، توکن مالک |
+| `outbox.py` | تحویل دست‌کم‌یک‌بار رویدادها با backoff و وضعیت `dead` |
+| `worker.py` | رأی‌گیری مصرف، checkpoint، تسویهٔ آبشاری به والدین، تعلیق policy |
+| `migrate.py` | اجرای migration با advisory lock و قابل تکرار (idempotent) |
+
+## پول
+
+- هیچ موجودی بدون `Transaction` تغییر نمی‌کند؛ trigger دیتابیس نوشتن به موجودی کش‌شده را
+  خارج از تراکنش دفتر رد می‌کند.
+- تراز با دید `ledger_imbalance` پایش می‌شود و در `doctor.sh` و `restore.sh` بررسی می‌گردد.
+- قفل‌ها به ترتیب قطعی `account_id` گرفته می‌شوند تا بن‌بست ایجاد نشود.
+- هر نوشتن مالی کلید `Idempotency-Key` الزامی دارد؛ درخواست تکراری همان نتیجه را برمی‌گرداند.
+- سقف اعتبار (`credit_limit_irr`) تنها تعهد قراردادی است؛ برداشت بیش از موجودی تا این سقف
+  مجاز است و بیشتر از آن رد می‌شود.
+- درخواست اعتبار با تأیید مدیر، موجودی را در تمام سطوح والد به‌صورت زنجیره‌ای تسویه می‌کند و
+  سود هر سطح از قیمت قرارداد همان سطح محاسبه می‌شود.
+- اصلاح حساب (مبلغ منفی) فقط با درخواست یک نفر و تأیید نفر دیگر انجام می‌شود
+  (`ApprovalRequest`) و هر دوSide در رسیدگی ثبت می‌شوند.
+
+## مصرف و اتصال به پنل
+
+مصرف از aggregate مدیر پنل خوانده می‌شود، با checkpoint قبلی مقایسه و اختلاف در ضریب
+`usage_coefficient` همان پنل ضرب می‌گردد. کاهش ناگهانی مصرف (بازنشانی پنل) با
+`USAGE_RESET_CONFIRM_READINGS` تأیید می‌شود تا صورتحساب تکراری یا معکوس تولید نشود.
+رازها به شکل `enc://` (Fernet) یا `env://` ذخیره می‌شوند، هرگز در پاسخ یا لاگ ظاهر نمی‌شوند،
+و پیش از ذخیرهٔ سرور با یک فراخوانی واقعی اعتبارسنجی می‌شوند.
+
+## دسترسی‌ها
+
+شش نقش: `system_admin` (فقط از `ROOT_TELEGRAM_ID`، هرگز از طریق API قابل اعطا نیست)،
+`reseller_admin`، `operator`، `finance`، `support`، `viewer`. وب‌اپ و بات هر دو از
+`/v1/webapp/capabilities` مجموعهٔ مجوز را می‌گیرند و فقط نمایش می‌دهند؛ سرور در هر درخواست
+مجدداً ماتریس را بررسی می‌کند، بنابراین یک کلاینت دستکاری‌شده هیچ عملیاتی را باز نمی‌کند.
+
+## رویدادها
+
+`outbox` تغییرات مالی و تصمیم‌ها را به رویداد تبدیل می‌کند؛ مصرف‌کننده با claim timeout و
+تلاش مجدد، تحویل دست‌کم‌یک‌بار را تضمین می‌کند و پیام‌های شکست‌خورده پس از `OUTBOX_MAX_ATTEMPTS`
+به وضعیت `dead` می‌روند تا در `doctor.sh` قابل مشاهده بمانند. تعلیق policy از همین مسیر
+اعلام و پنل با `HOLD_LIMIT_BYTES` محدود می‌شود.
