@@ -17,7 +17,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def _database_url() -> str:
     import pgserver
 
-    return pgserver.get_server(str(ROOT / ".pgdata-test")).get_uri().replace("postgresql://", "postgresql+psycopg://")
+    data_dir = ROOT.parent / ".pgdata-control-plane-test"
+    return pgserver.get_server(str(data_dir), cleanup_mode=None).get_uri().replace("postgresql://", "postgresql+psycopg://")
 
 
 DATABASE_URL = _database_url()

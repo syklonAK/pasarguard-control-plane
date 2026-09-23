@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 from sqlalchemy import text
 
 EXPECTED_TABLES = {
@@ -49,7 +50,8 @@ def test_migrations_are_idempotent(engine):
     with engine.connect() as probe:
         applied = probe.execute(text("SELECT count(*) FROM schema_migrations")).scalar()
         assert _tables(probe) == before
-    assert applied == 3
+    expected = len(list((Path(__file__).resolve().parents[1] / "migrations").glob("*.sql")))
+    assert applied == expected
 
 
 def test_ledger_is_append_only(session, make_org):

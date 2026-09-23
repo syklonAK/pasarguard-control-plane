@@ -1,31 +1,18 @@
 import hmac
 import os
-from datetime import datetime
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, ForeignKey, String, Text, select
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .app import (
-    Account, Actor, Base, Binding, Closure, ENGINE, Membership, Organization,
-    Panel, account, app, db, membership_for, web_identity,
+    Actor, Binding, Closure, Membership, Organization, Panel, PanelOwner, SystemSetting,
+    account, app, audit, db, membership_for, put_setting, web_identity,
 )
-from .migrate import run_migrations
 from .pasarguard import Client
 from .secrets import encrypt_secret, resolve_secret
 
-app.version = "0.4.0"
-
-class PanelOwner(Base):
-    __tablename__ = "panel_owners"
-    panel_id: Mapped[str] = mapped_column(ForeignKey("panels.id"), primary_key=True)
-    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
-
-class SystemSetting(Base):
-    __tablename__ = "system_settings"
-    key: Mapped[str] = mapped_column(String(100), primary_key=True)
-    value: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+app.version = "0.8.0"
 
 class BootstrapIn(BaseModel):
     business_name: str = Field(min_length=2, max_length=160)
@@ -40,11 +27,8 @@ class WebPanelIn(BaseModel):
     owner_password: str | None = Field(default=None, max_length=500)
     pg_admin_id: int | None = Field(default=None, gt=0)
     admin_username: str | None = Field(default=None, max_length=80)
+    usage_coefficient: float = Field(default=1.0, gt=0, le=1000)
 
-@app.on_event("startup")
-def migrate_on_startup():
-    Base.metadata.create_all(ENGINE)
-    run_migrations(ENGINE)
 
 def optional_membership(s: Session, telegram_id: int):
     actor = s.scalar(select(Actor).where(Actor.telegram_id == telegram_id, Actor.status == "active"))
@@ -94,7 +78,9 @@ def bootstrap_workspace(x: BootstrapIn, identity=Depends(web_identity), s: Sessi
         actor = Actor(telegram_id=identity.user_id, display_name=identity.first_name)
         s.add(actor); s.flush()
     s.add(Membership(organization_id=organization.id, actor_id=actor.id, role="reseller_admin"))
-    s.add(SystemSetting(key="bootstrap_complete", value=organization.id)); s.commit()
+    put_setting(s, "bootstrap_complete", organization.id)
+    audit(s, "workspace.bootstrap", "organization", organization.id, actor_id=actor.id, organization_id=organization.id, metadata={"slug": organization.slug})
+    s.commit()
     return {"organization_id": organization.id, "actor_id": actor.id}
 
 @app.get("/v1/webapp/panels")
@@ -112,12 +98,13 @@ def web_create_panel(x: WebPanelIn, identity=Depends(web_identity), s: Session =
         probe = Client(x.base_url.rstrip("/"), x.api_key, x.owner_username, x.owner_password, True).nodes()
     except Exception as exc:
         raise HTTPException(422, f"PasarGuard connection failed: {exc}") from exc
-    panel = Panel(name=x.name, base_url=x.base_url.rstrip("/"), api_key_ref=encrypt_secret(x.api_key), owner_user_ref=encrypt_secret(x.owner_username), owner_pass_ref=encrypt_secret(x.owner_password), verify_tls=True)
+    panel = Panel(name=x.name, base_url=x.base_url.rstrip("/"), api_key_ref=encrypt_secret(x.api_key), owner_user_ref=encrypt_secret(x.owner_username), owner_pass_ref=encrypt_secret(x.owner_password), usage_coefficient=x.usage_coefficient, verify_tls=True)
     s.add(panel); s.flush(); s.add(PanelOwner(panel_id=panel.id, organization_id=organization.id))
     if x.pg_admin_id:
         if s.scalar(select(Binding.id).where(Binding.organization_id == organization.id)):
             raise HTTPException(409, "this organization already has a billing binding")
         s.add(Binding(organization_id=organization.id, panel_id=panel.id, pg_admin_id=x.pg_admin_id, username=x.admin_username or str(x.pg_admin_id)))
+    audit(s, "panel.create", "panel", panel.id, organization_id=organization.id, metadata={"base_url": panel.base_url, "usage_coefficient": str(panel.usage_coefficient)})
     s.commit()
     nodes = probe.get("nodes", probe if isinstance(probe, list) else [])
     return {"id": panel.id, "name": panel.name, "status": panel.status, "nodes_detected": len(nodes) if isinstance(nodes, list) else 0}
