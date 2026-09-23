@@ -14,19 +14,12 @@
 - اتصال هر نمایندگی به Admin پاسارگارد
 - Billing Worker گروه‌بندی‌شده به تفکیک پنل
 - Telegram Gateway و صف Redis
-- WebApp فارسی و موبایل‌محور
+- WebApp انگلیسی و موبایل‌محور
 - PostgreSQL، Redis، Nginx و HTTPS خودکار Caddy
 
 ## نصب تک‌کامندی
 
-### پیش‌نیازها
-
-- Ubuntu 22.04/24.04 یا Debian 12
-- حداقل 4 CPU و 8GB RAM
-- دامنه متصل به IP سرور
-- باز بودن پورت‌های 80 و 443
-- Token ربات تلگرام
-- آدرس HTTPS و API Key پاسارگارد
+پیش‌نیاز: Ubuntu/Debian، حداقل 2 هسته CPU (پیشنهاد Production: چهار هسته یا بیشتر)، 8GB RAM، دامنه و Token ربات.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/main/install.sh | sudo bash
@@ -38,20 +31,32 @@ curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/m
 sudo bash /opt/pasarguard-control-plane/scripts/bootstrap.sh
 ```
 
-آدرس WebApp در BotFather:
+## بروزرسانی با یک فایل
 
-```text
-https://YOUR-DOMAIN/app/
+بعد از نصب اولیه، برای دریافت و اعمال نسخه جدید فقط اجرا کنید:
+
+```bash
+sudo bash /opt/pasarguard-control-plane/update.sh
 ```
 
-## نگهداری
+Updater تنظیمات `.env` را حفظ می‌کند، نسخه جدید را دریافت می‌کند، سرویس‌ها را مجدد می‌سازد و Health Check انجام می‌دهد.
+
+## رفع خطای CPU روی سرور دو هسته‌ای
+
+اگر نصب قبلی هنگام ساخت Container متوقف شده، این دستورها را یک‌بار اجرا کنید:
+
+```bash
+cd /opt/pasarguard-control-plane
+git pull --ff-only
+sudo bash update.sh
+```
+
+## دستورات نگهداری
 
 ```bash
 sudo bash /opt/pasarguard-control-plane/scripts/doctor.sh
 sudo bash /opt/pasarguard-control-plane/scripts/backup.sh
-sudo bash /opt/pasarguard-control-plane/scripts/update.sh
+sudo bash /opt/pasarguard-control-plane/update.sh
 ```
 
-## ظرفیت و هشدار Production
-
-معماری برای 10,000 کاربر و 1,000 اتصال هم‌زمان طراحی شده است، اما تأیید نهایی ظرفیت به تست بار روی Staging مشابه Production نیاز دارد. قبل از ورود پول واقعی، بازیابی Backup، Failover، MFA/RBAC، Approval عملیات حساس و Reconciliation مالی را آزمایش کنید.
+> پیش از ورود پول واقعی، تست بار، بازیابی Backup، Failover، MFA/RBAC، Approval عملیات حساس و Reconciliation مالی را آزمایش کنید.

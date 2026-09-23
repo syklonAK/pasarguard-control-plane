@@ -6,7 +6,7 @@ services:
     environment: {POSTGRES_DB: control, POSTGRES_USER: control, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-control}"}
     volumes: ["pg_data:/var/lib/postgresql/data", "./migrations:/docker-entrypoint-initdb.d:ro"]
     healthcheck: {test: ["CMD-SHELL", "pg_isready -U control -d control"], interval: 5s, timeout: 3s, retries: 30}
-    deploy: {resources: {limits: {cpus: "4", memory: 6G}}}
+    deploy: {resources: {limits: {cpus: "${POSTGRES_CPU_LIMIT:-1.5}", memory: 6G}}}
   redis:
     restart: unless-stopped
     image: redis:7.4-alpine
@@ -19,7 +19,7 @@ services:
     env_file: .env
     command: ["uvicorn","control_plane.app:app","--host","0.0.0.0","--port","8000","--workers","4","--limit-concurrency","2000","--backlog","4096"]
     depends_on: {postgres: {condition: service_healthy}}
-    deploy: {replicas: 2, resources: {limits: {cpus: "2", memory: 2G}}}
+    deploy: {replicas: 2, resources: {limits: {cpus: "${API_CPU_LIMIT:-0.75}", memory: 2G}}}
   billing-worker:
     restart: unless-stopped
     build: .

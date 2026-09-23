@@ -28,7 +28,6 @@ if ! command -v docker >/dev/null; then
 fi
 systemctl enable --now docker
 docker compose version >/dev/null || die "Docker Compose نصب نشد."
-
 if [[ ! -f "$INSTALL_DIR/pyproject.toml" ]]; then
   info "انتقال پروژه به $INSTALL_DIR"
   rm -rf "$INSTALL_DIR"; mkdir -p "$INSTALL_DIR"
@@ -69,6 +68,8 @@ DB_POOL_SIZE=20
 DB_MAX_OVERFLOW=40
 DB_POOL_TIMEOUT=10
 USAGE_POLL_SECONDS=30
+POSTGRES_CPU_LIMIT=1.5
+API_CPU_LIMIT=0.75
 EOF
 chmod 600 .env
 export POSTGRES_PASSWORD

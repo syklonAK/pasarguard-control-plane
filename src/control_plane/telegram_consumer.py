@@ -3,7 +3,7 @@ import httpx
 from redis.asyncio import Redis
 
 STREAM="telegram_updates"; GROUP="telegram-workers"
-MENU={"keyboard":[[{"text":"📊 داشبورد"},{"text":"🛒 خرید عمده"}],[{"text":"👥 زیرمجموعه‌ها"},{"text":"🧩 سرویس‌ها"}],[{"text":"💳 حسابداری"},{"text":"🛟 پشتیبانی"}]],"resize_keyboard":True}
+MENU={"keyboard":[[{"text":"📊 Dashboard"},{"text":"🛒 Wholesale"}],[{"text":"👥 Resellers"},{"text":"🧩 Services"}],[{"text":"💳 Billing"},{"text":"🛟 Support"}]],"resize_keyboard":True}
 
 async def send(chat_id:int,text:str):
     token=os.environ["TELEGRAM_BOT_TOKEN"]
@@ -22,7 +22,7 @@ async def main():
             for message_id,data in items:
                 try:
                     u=json.loads(data["update"]);m=u.get("message") or {};chat=(m.get("chat") or {}).get("id")
-                    if chat:await send(chat,"به پنل عمده‌فروشی خوش آمدید." if m.get("text")=="/start" else "درخواست شما دریافت شد.")
+                    if chat:await send(chat,"Welcome to your wholesale control panel." if m.get("text")=="/start" else "Your request has been received.")
                     await redis.xack(STREAM,GROUP,message_id)
                 except Exception as exc:print(f"telegram message {message_id}: {exc}",flush=True)
 
