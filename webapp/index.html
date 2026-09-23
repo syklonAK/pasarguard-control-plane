@@ -1,0 +1,9 @@
+<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>پنل عمده‌فروشی</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="styles.css"></head><body>
+<header><div><small>پنل کسب‌وکار</small><h1 id="org">در حال اتصال…</h1></div><span id="status" class="pill">آنلاین</span></header>
+<main><section class="balance"><small>اعتبار قابل استفاده</small><strong id="available">—</strong><div><span>موجودی <b id="balance">—</b></span><span>اعتبار <b id="credit">—</b></span></div></section>
+<section class="stats"><article><small>مصرف کل</small><b id="usage">—</b></article><article><small>زیرمجموعه</small><b id="children-count">—</b></article></section>
+<nav><button data-page="home" class="active">خانه</button><button data-page="children">زیرمجموعه‌ها</button><button data-page="finance">حسابداری</button></nav>
+<section id="home" class="page active"><h2>دسترسی سریع</h2><div class="actions"><button id="fund">درخواست شارژ</button><button id="new-child">ساخت زیرمجموعه</button><button id="refresh">بروزرسانی</button></div><div id="notice" class="notice">عملیات مالی پس از تأیید مدیر انجام می‌شود.</div></section>
+<section id="children" class="page"><h2>زیرمجموعه‌ها</h2><div id="children-list" class="list"></div></section>
+<section id="finance" class="page"><h2>تراکنش‌های اخیر</h2><div id="transactions" class="list"></div></section></main>
+<div id="modal" class="modal"><form id="modal-form"><h3 id="modal-title"></h3><div id="modal-fields"></div><div class="modal-actions"><button type="button" id="cancel">انصراف</button><button type="submit">ثبت درخواست</button></div></form></div><script src="app.js"></script></body></html>
