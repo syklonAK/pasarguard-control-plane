@@ -1,107 +1,180 @@
-# PasarGuard B2B Control Plane
+<div align="center">
 
-Enterprise wholesale and reseller management for PasarGuard: double-entry usage billing, recursive
-reseller accounts, encrypted panel credentials, six server-enforced roles, a Telegram Bot and a
-Telegram WebApp. Sized for 10,000 resellers and 1,000 concurrent operators; it is not a proxy and
-never sits in the subscriber data path.
+# PasarGuard Control Plane
 
-## Product flow
+**کنترل‌پنل سازمانی فروش عمده و مدیریت نمایندگان برای پاسارگارد**
 
-1. Install the infrastructure with one command.
-2. Open the Telegram bot and tap **Open Panel**.
-3. Enter the one-time setup token shown after installation.
-4. Register PasarGuard servers from **WebApp → Servers**.
-5. Manage resellers, nodes, subscribers, credit and billing from the WebApp or the bot.
-   Server registration is never performed through terminal questions.
+دفتر دو-طرفهٔ مصرفی، سلسله‌مراتب باز نمایندگان، دسترسی‌های رمزنگاری‌شدهٔ پنل، شش نقش سمت‌سروری،
+ربات تلگرام و وب‌اپ تلگرام.
 
-## One-command installation
+[![CI](https://github.com/syklonAK/pasarguard-control-plane/actions/workflows/quality.yml/badge.svg)](https://github.com/syklonAK/pasarguard-control-plane/actions/workflows/quality.yml)
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791)
+![Redis](https://img.shields.io/badge/Redis-7-dc382c)
+![UI](https://img.shields.io/badge/وب%E2%80%8Cاپ-فارسی%20RTL-6c5ce7)
 
-Requirements: Ubuntu 22.04/24.04 or Debian 12, a domain pointing at the server, ports 80/443 free,
-and a Telegram bot token. The installer asks for the root Telegram id and the bot token, installs
-Docker when missing, writes `.env` with mode `600`, and registers the webhook.
+</div>
+
+---
+
+این پروژه یک **لایهٔ کنترل کسب‌وکار** است، نه پروکسی و نه تونل: هیچ ترافیک اشتراکی از آن عبور
+نمی‌کند و هرگز در مسیر دادهٔ مشترک قرار نمی‌گیرد. برای ~۱۰٬۰۰۰ نماینده و ~۱٬۰۰۰ اپراتور همزمان
+اندازه‌گذاری شده است (جزئیات: [docs/CAPACITY-10K.md](docs/CAPACITY-10K.md)).
+
+## چه کاری انجام می‌دهد
+
+| حوزه | رفتار پیاده‌شده |
+| --- | --- |
+| مالی | دفتر دو-طرفه؛ هر تغییر موجودی فقط از مسیر `Transaction`، با تریگر `plpgsql` در دیتابیس که نوشتنِ مستقیم موجودی را رد می‌کند |
+| اعتبار | سقف اعتبار، درخواست تأمین موجودی با تأیید/رد، و تسویهٔ آبشاری به همهٔ والدها با سود هر سطح |
+| اصلاح حساب | فقط با تأیید دوم نفره (درخواست‌کننده ≠ تأییدکننده) و ثبت در رسیدگی |
+| ساختار | درخت باز نمایندگان با جدول closure، عمق سقف‌دار (`MAX_TREE_DEPTH`) و contracts جدا برای هر سطح |
+| پاسارگارد | رجیستری چند-پنلی، تست اتصال پیش از ذخیره، کلید API و رمز مالک با Fernet (`enc://…`)، عملیات نود/مشترک/ادمین |
+| مصرف | checkpoint های دوره‌ای، `usage_coefficient` برای هر پنل، تشخیص reset و regression بدون صورتحساب تکراری |
+| رویدادها | Outbox با تحویل حداقل-یک‌بار، backoff و وضعیت dead-letter؛ hold روی مصرف تا تسویه |
+| رابط | ربات تلگرام فارسی + وب‌اپ RTL با قابلیت‌محوری (هیچ تصمیم دسترسی در مرورگر) |
+| عملیات | healthcheck، metrics، لاگ ساخت‌یافته، backup/restore/rotation، doctor، نصب و به‌روزرسانی با یک دستور |
+
+## معماری
+
+```text
+Telegram ──webhook──▶ telegram-gateway ──▶ Redis Streams ──▶ telegram-consumer (ربات)
+                                     │
+مرورگر/وب‌اپ ──HTTPS──▶ gateway ──▶ api (FastAPI) ◀──── Caddy/nginx ──▶ webapp/ (RTL)
+                                     │           │
+                                     │           ├─▶ PostgreSQL (دفتر، موجودی کش‌شده، outbox)
+                                     │           └─▶ PasarGuard panel API
+                       billing-worker ─┴─ outbox-worker
+```
+
+| سرویس (docker-compose.enterprise.yml) | نقش |
+| --- | --- |
+| `gateway` / `caddy` | TLS، هدرهای امنیتی، HSTS، CSP `frame-ancestors` |
+| `api` | مسیرهای `/v1/…` (ماشین، `X-Control-Key`) و `/v1/webapp/…` (انسان، امضای `initData`) |
+| `postgres` | دفتر، قفل ردیف، view تشخیص ناعدی `ledger_imbalance` |
+| `redis` | محدودساز نرخ، state فرم، dedupe رویداد تلگرام، صف استریم |
+| `billing-worker` | polls مصرف، checkpoint، تسویهٔ آبشاری، hold |
+| `outbox-worker` | تحویل رویدادها با backoff |
+| `telegram-gateway` / `telegram-consumer` | دریافت webhook و کارگر ربات با consumer group |
+
+مسیر کد: `src/control_plane/rbac.py` تنها مرجع واقعیت نقش است؛ هم کیبورد ربات و هم منوی وب‌اپ از
+`/v1/webapp/capabilities` ساخته می‌شوند و هر route همان ماتریس را سمت سرور دوباره بررسی می‌کند.
+
+## نصب سریع
+
+پیش‌نیاز: Ubuntu 22.04/24.04 یا Debian 12، دامنه‌ای که به سرور اشاره می‌کند، پورت‌های 80/443 آزاد، و
+توکن ربات تلگرام.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/syklonAK/pasarguard-control-plane/main/install.sh | sudo bash
 ```
 
-All installer prompts are in English. Rerunning the installer preserves existing `.env` secrets and
-installs a nightly `pasarguard-backup.timer` that runs `scripts/backup.sh` (retention: `BACKUP_RETENTION`).
+نصب‌کننده داکر را در صورت نبود نصب می‌کند، `.env` با مجوز `600` می‌نویسد، شناسهٔ تلگرام مدیر کل
+(`ROOT_TELEGRAM_ID`) و توکن ربات را می‌پرسد، webhook را ثبت می‌کند و تایمر backup شبانه
+(`pasarguard-backup.timer`) را فعال می‌سازد. اجرای مجدد، رازهای موجود را بازنویسی نمی‌کند.
 
-## First-time WebApp setup
+### راه‌اندازی اولیه (وب‌اپ، نه ترمینال)
 
 ```bash
 sudo grep INITIAL_SETUP_TOKEN /root/pasarguard-control-plane-credentials.txt
 ```
 
-Open the bot, tap **Open Panel**, and create the root business with that token. The bootstrap route
-accepts only `ROOT_TELEGRAM_ID` and only once. Then add PasarGuard panels from
-**Servers → Add server**; the API key and owner password are tested against the panel, encrypted
-with `APP_ENCRYPTION_KEY` (`enc://…` in the database), and never returned by any read endpoint.
+ربات را باز کنید، «وب‌اپ مدیریت» را بزنید و کسب‌وکار ریشه را با آن توکن بسازید. مسیر bootstrap تنها
+برای `ROOT_TELEGRAM_ID` و فقط یک‌بار باز است. سپس از **سرورها ← افزودن سرور** پنل‌های پاسارگارد را
+ثبت کنید؛ کلید API و رمز مالک پیش از ذخیره روی پنل تست می‌شوند، رمزنگاری می‌شوند و از هیچ endpoint
+خواندنی برنمی‌گردند. ثبت سرور هرگز از طریق سؤالات ترمینال انجام نمی‌شود.
 
-## Repository layout
+## نقش‌ها
+
+| نقش | دسترسی |
+| --- | --- |
+| مدیر کل سیستم (`system_admin`) | همه‌چیز، از جمله تأیید اصلاح حساب، ضریب صورتحساب و خاموش‌کردن اعتبارسنجی TLS؛ از `ROOT_TELEGRAM_ID` مشتق می‌شود و قابل تخصیص نیست |
+| مدیر نمایندگی (`reseller_admin`) | مشاهده، درخواست و تأیید مالی، سرورها، نودها، مشترکان، سقف پنل، مدیریت نمایندگان |
+| اپراتور (`operator`) | داشبورد/رسیدگی/خروجی، ثبت سرور، کنترل نود و مشترک، تغییر سقف پنل |
+| مدیر مالی (`finance`) | مشاهدهٔ مالی و رسیدگی، درخواست افزایش اعتبار و اصلاح حساب، تأیید درخواست مالی |
+| پشتیبان (`support`) | داشبورد، مالی (فقط مشاهده)، تیکت و پاسخ، مدیریت مشترکان |
+| مشاهده‌گر (`viewer`) | داشبورد، مشاهدهٔ مالی، خروجی گزارش |
+
+نقش از ردیف عضویت **فعال** سمت سرور خوانده می‌شود؛ نقش ناشناخته بدون هیچ امتیازی (`viewer` بی‌دسترسی
+خاص) در نظر گرفته می‌شود.
+
+## عملیات
+
+```bash
+cd /opt/pasarguard-control-plane
+
+bash scripts/doctor.sh                     # سلامت سرویس‌ها، MIME، باز/بسته بودن metrics، drift دفتر، lag استریم
+bash scripts/backup.sh                     # dump تأییدشده + چرخش نسخه‌ها (BACKUP_RETENTION)
+bash scripts/restore.sh backups/control-<STAMP>.sql.gz          # پیش‌فرض روی دیتابیس scratch
+bash scripts/restore.sh <file> --into control --force           # جایگزینی زنده، پس از backup ایمنی
+sudo bash update.sh                        # pull با fast-forward، migration idempotent، rebuild، webhook
+sudo bash uninstall.sh                     # داده و volume ها می‌مانند؛ پاک کردن فقط با --purge-data
+```
+
+`update.sh` هرگز `.env` را بازنویسی نمی‌کند، volume ها را حذف نمی‌کند و اگر migration شکست بخورد
+راه‌اندازی نمی‌کند. داکر در حذف نصب هرگز برداشته نمی‌شود.
+
+## پیکربندی
+
+تمام کلیدها در [`.env.example`](.env.example) مستندند. آنچه رفتار را عوض می‌کند نه credential را:
+
+| کلید | پیش‌فرض | کاربرد |
+| --- | --- | --- |
+| `METRICS_TOKEN` | خالی | با تنظیم‌نشدن، `/metrics` بسته می‌ماند |
+| `RATE_LIMIT_PER_MINUTE` / `RATE_LIMIT_WRITE_PER_MINUTE` | — | محدودساز نرخ نوشتن‌های ناشناس و webhook |
+| `TRUST_PROXY_HEADERS` | `false` | فقط پشت پروکسی که `X-Forwarded-For` را بازنویسی می‌کند |
+| `EXPOSE_DOCS` | `false` | فعال‌سازی `/docs` |
+| `MAX_TREE_DEPTH` | `5` | سقف عمق درخت نمایندگان |
+| `APPROVAL_TTL_SECONDS` | `604800` | انقضای درخواست‌های تأیید نشده |
+| `HOLD_LIMIT_BYTES` | `1` | آستانهٔ hold مصرف قبل از تسویه |
+| `BACKUP_RETENTION` | `30` | تعداد نسخه‌های نگه‌داشته‌شده |
+
+## ساختار مخزن
 
 ```text
 src/control_plane/
-  app.py                domain kernel: models, ledger, hierarchy, secrets, onboarding
-  api.py                machine API (/v1/…) guarded by X-Control-Key
-  web_api.py            human API (/v1/webapp/…) guarded by Telegram initData
-  rbac.py               the permission matrix; the only source of role truth
-  main.py               ASGI entrypoint: middleware, security headers, /health, /metrics
-  observability.py      structured JSON logs, rate limiting, Prometheus text exposition
-  telegram_gateway.py   webhook receiver: HMAC check, update_id dedupe, Redis Stream enqueue
-  telegram_consumer.py  bot menu worker (Redis consumer group), Persian replies
-  pasarguard.py         thin PasarGuard HTTP client (single place for every panel path)
-  outbox.py             at-least-once event delivery with backoff and dead-letter status
-  worker.py             billing poller: usage checkpoints, cascade settlement, holds
-  migrate.py            advisory-locked, idempotent migration runner
-webapp/                 Persian RTL Telegram WebApp (single page, capability-driven UI)
-migrations/             ordered SQL, applied on empty and existing databases alike
-scripts/                backup, restore, doctor, release-check, configure-telegram
-deploy/                 nginx and Caddy reverse-proxy configurations
-load/k6.js              10k-user / 1k-concurrent load profile
+  app.py                هستهٔ دامنه: مدل‌ها، دفتر، سلسله‌مراتب، رازها، onboarding
+  api.py                API ماشین (/v1/…) با نگهبان X-Control-Key
+  web_api.py            API انسان (/v1/webapp/…) با نگهبان امضای initData
+  rbac.py               ماتریس دسترسی؛ تنها مرجع واقعیت نقش
+  main.py               ورودی ASGI: میدل‌ورها، هدرهای امنیتی، /health، /metrics
+  observability.py      لاگ JSON ساخت‌یافته، محدودساز نرخ، متن Prometheus
+  telegram_gateway.py   دریافت webhook: بررسی HMAC، dedupe update_id، enqueue در Redis Stream
+  telegram_consumer.py  کارگر منوی ربات (consumer group)، پاسخ‌های فارسی
+  pasarguard.py         کلاینت نازک HTTP پاسارگارد (تک‌محل مسیرهای پنل)
+  outbox.py             تحویل حداقل-یک‌بار رویداد با backoff و dead-letter
+  worker.py             polls صورتحساب: checkpoint، تسویهٔ آبشاری، hold
+  migrate.py            runner مهاجرت با advisory lock و idempotent
+webapp/                 وب‌اپ فارسی RTL تلگرام (تک‌صفحه، قابلیت‌محور)
+migrations/             SQL ترتیب‌دار، روی دیتابیس خالی و موجود یکسان
+scripts/                backup، restore، doctor، release-check، configure-telegram
+deploy/                 پیکربندی nginx و Caddy
+load/k6.js              پروفایل بار ۱۰k کاربر / ۱k همزمان
+docs/                   معماری، onboarding، ظرفیت
 ```
 
-## Roles
-
-`system_admin` (derived from `ROOT_TELEGRAM_ID`, never assignable), `reseller_admin`, `operator`,
-`finance`, `support`, `viewer`. Both the bot keyboard and the WebApp menus are built from
-`/v1/webapp/capabilities`; every route re-checks the same matrix on the server, and a refusal never
-reaches the panel. Correcting a settled balance requires a requester and an approver that are two
-different people, and only the system administrator may approve.
-
-## Configuration
-
-`.env` is generated by the installer and documented in `.env.example`. The keys that change
-behaviour rather than credentials are `METRICS_TOKEN` (without it `/metrics` stays closed),
-`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_WRITE_PER_MINUTE`, `TRUST_PROXY_HEADERS` (only behind a proxy
-that rewrites `X-Forwarded-For`), `EXPOSE_DOCS`, `MAX_TREE_DEPTH`, `APPROVAL_TTL_SECONDS` and
-`BACKUP_RETENTION`.
-
-## Operations
+## تست و بازبینی
 
 ```bash
-sudo bash /opt/pasarguard-control-plane/scripts/doctor.sh    # health, MIME, metrics, drift, outbox, stream lag
-sudo bash /opt/pasarguard-control-plane/scripts/backup.sh    # verified gzip dump + retention rotation
-sudo bash /opt/pasarguard-control-plane/scripts/restore.sh backups/control-YYYYmmdd-HHMMSS.sql.gz
-sudo bash /opt/pasarguard-control-plane/update.sh            # fast-forward pull, migrations, rebuild, webhook
+pip install -e .[test] && pytest        # ۱۰۷ تست روی PostgreSQL واقعی، شامل تریگرهای دفتر
+bash scripts/release-check.sh            # سینتکس shell/Python/JS، YAML کامپوز، اسکن الگوی راز
+k6 run load/k6.js                        # پروفایل بار مستند
 ```
 
-`restore.sh` writes to a scratch database (`control_restore`) unless the operator passes
-`--into control --force`, which first takes a fresh safety backup of the live database.
-`update.sh` never rewrites `.env`, never drops volumes, and refuses to start when migrations fail.
-`uninstall.sh --purge-data` is the only path that removes data and it asks for confirmation;
-Docker itself is never removed.
+در GitHub Actions دو job اجرا می‌شود: `static` (release-check) و `test` روی سرویس
+`postgres:17-alpine`، تا migration و تریگرها روی همان رفتار SQL production سنجیده شوند.
 
-## Verification
+## مستندات
 
-```bash
-pip install -e .[test] && pytest -q      # real PostgreSQL via pgserver, ledger triggers included
-bash scripts/release-check.sh            # shell/python/JS syntax, compose YAML, secret scan
-node load/k6.js                          # documented k6 profile, see docs/CAPACITY-10K.md
-```
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — ماژول‌ها، ثابت‌های پولی، مصرف و RBAC
+- [docs/ONBOARDING.md](docs/ONBOARDING.md) — راه‌اندازی ۹ مرحله‌ای از مسیر وب‌اپ
+- [docs/CAPACITY-10K.md](docs/CAPACITY-10K.md) — فرض‌های ظرفیت و پروفایل بار
+- [SECURITY.md](SECURITY.md) — رازها، هویت، ورودی‌ها و عملیات امنیتی
 
-Every money movement is a `Transaction` with balanced `Entry` rows; a database trigger rejects any
-write to a cached balance that is not made inside a ledger transaction, and `ledger_imbalance`
-exposes drift. Before accepting real money, complete a restore drill, reconciliation against a
-staging panel, and the approval workflow. See `docs/ARCHITECTURE.md`, `docs/ONBOARDING.md`,
-`docs/CAPACITY-10K.md` and `SECURITY.md`.
+## محدودیت‌های شناخته‌شده
+
+- آدرس پنل فقط از نظر `https`، قالب hostname و نبود credentials بررسی می‌شود؛ blocklist برای
+  دامنه‌های داخلی و IP خصوصی (دفاع SSRF) پیاده نشده است.
+- اجرای واقعی restore drill و پروفایل k6 روی زیرساخت production بر عهدهٔ اپراتور است.
+- برای پذیرش پول واقعی: تطبیق با پنل staging، تکمیل گردش تأیید دوم نفره و یک تمرین بازیابی انجام شود.
