@@ -4,8 +4,14 @@ CREATE INDEX IF NOT EXISTS ix_usage_binding_observed ON usage_observations(bindi
 CREATE INDEX IF NOT EXISTS ix_outbox_status_topic ON outbox(status,topic);
 CREATE INDEX IF NOT EXISTS ix_transactions_created ON transactions(created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_entries_account_tx ON entries(account_id,transaction_id);
-ALTER TABLE entries ADD CONSTRAINT ck_entry_positive CHECK (amount_irr >= 0);
-ALTER TABLE entries ADD CONSTRAINT ck_entry_side CHECK (side IN ('debit','credit'));
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_entry_positive') THEN
+  ALTER TABLE entries ADD CONSTRAINT ck_entry_positive CHECK (amount_irr >= 0);
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_entry_side') THEN
+  ALTER TABLE entries ADD CONSTRAINT ck_entry_side CHECK (side IN ('debit','credit'));
+ END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION forbid_ledger_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'ledger is append-only'; END $$;
