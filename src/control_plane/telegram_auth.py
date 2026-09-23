@@ -18,4 +18,15 @@ def verify_init_data(init_data:str,bot_token:str,max_age_seconds:int=3600,now:in
     if auth_date<=0 or current-auth_date>max_age_seconds or auth_date>current+30:raise TelegramAuthError("expired Telegram session")
     try:user=json.loads(values["user"]);user_id=int(user["id"])
     except (KeyError,ValueError,TypeError,json.JSONDecodeError) as exc:raise TelegramAuthError("invalid Telegram user") from exc
-    return TelegramIdentity(user_id,user.get("first_name","") ,user.get("last_name"),user.get("username"),auth_date)
+    return TelegramIdentity(user_id, user.get("first_name","") , user.get("last_name"), user.get("username"), auth_date)
+
+
+def declared_user_id(init_data:str)->int|None:
+    """Read the Telegram id a caller claims, without trusting the signature.
+
+    Only the rate budget uses this. Authorization always goes through ``verify_init_data``;
+    a budget simply must not reset every time the browser re-signs a fresh ``auth_date``.
+    """
+    if not init_data: return None
+    try: return int(json.loads(dict(parse_qsl(init_data,keep_blank_values=True))["user"])["id"])
+    except (KeyError,TypeError,ValueError,json.JSONDecodeError): return None

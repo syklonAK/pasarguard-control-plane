@@ -20,7 +20,7 @@ from sqlalchemy import text
 from . import observability as metrics
 from .api import router as control_router
 from .app import SessionLocal, configured_root_id, lifespan, now
-from .telegram_auth import TelegramAuthError, verify_init_data
+from .telegram_auth import TelegramAuthError, declared_user_id, verify_init_data
 from .web_api import router as web_router
 
 SECURITY_HEADERS = {
@@ -37,14 +37,22 @@ TRUST_PROXY = os.getenv("TRUST_PROXY_HEADERS", "0") == "1"
 
 
 def _caller_key(request: Request) -> str:
-    """Rate budget follows the authenticated identity, not a spoofable header."""
+    """Rate budget follows the authenticated identity, not a spoofable header.
+
+    Hashing the whole initData header would hand a fresh budget to the same caller every time
+    the WebApp re-signs with a new ``auth_date``, which is every few seconds.
+    """
     peer = ""
     if TRUST_PROXY:
         peer = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
     if not peer:
         peer = request.client.host if request.client else "unknown"
-    identity = request.headers.get("x-telegram-init-data", "")
-    return f"{peer}:{hashlib.sha256(identity.encode()).hexdigest()[:16]}" if identity else peer
+    declared = declared_user_id(request.headers.get("x-telegram-init-data", ""))
+    if declared is not None:
+        return f"{peer}:telegram-{declared}"
+    # Machine callers authenticate by API key, so the budget follows the credential.
+    key = request.headers.get("x-control-key", "")
+    return f"{peer}:key-{hashlib.sha256(key.encode()).hexdigest()[:16]}" if key else peer
 
 
 def create_app() -> FastAPI:

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
-from conftest import as_user
+from conftest import as_user, sign_init_data
 from control_plane import observability
 
 ROOT_ID = 100001
@@ -44,8 +45,11 @@ def test_write_requests_are_throttled_per_caller(client, session, make_org, make
 
 def test_read_budget_is_separate_from_write_budget(client, session, monkeypatch):
     monkeypatch.setattr(observability, "anon_limiter", observability.RateLimiter(1, 60))
-    assert client.get("/v1/webapp/capabilities", headers=as_user(ROOT_ID)).status_code in (200, 403)
-    assert client.get("/v1/webapp/capabilities", headers=as_user(ROOT_ID)).status_code == 429
+    # Nothing is bootstrapped yet, so the request is authorised downstream and refused there.
+    assert client.get("/v1/webapp/capabilities", headers=as_user(ROOT_ID)).status_code == 403
+    # Re-signing the session must not mint a fresh budget for the same caller.
+    resigned = {"X-Telegram-Init-Data": sign_init_data(ROOT_ID, int(time.time()) - 5)}
+    assert client.get("/v1/webapp/capabilities", headers=resigned).status_code == 429
 
 
 @pytest.fixture
