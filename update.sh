@@ -50,6 +50,10 @@ configure_telegram(){
 }
 
 docker compose "${COMPOSE[@]}" config >/dev/null
+info "Starting database services"
+docker compose "${COMPOSE[@]}" up -d postgres redis
+info "Synchronizing PostgreSQL credentials"
+bash scripts/sync-db-password.sh
 info "Rebuilding changed services"
 docker compose "${COMPOSE[@]}" up -d --build --remove-orphans
 info "Waiting for the internal API"
@@ -64,6 +68,7 @@ done
 if [[ "${INTERNAL_READY:-0}" != 1 ]]; then
   warn "Health check failed. Previous commit: $OLD_COMMIT"
   docker compose "${COMPOSE[@]}" ps
+  docker compose "${COMPOSE[@]}" logs --tail=80 api >&2 || true
   exit 1
 fi
 

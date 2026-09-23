@@ -116,7 +116,11 @@ configure_telegram(){
 }
 
 docker compose "${COMPOSE[@]}" config >/dev/null
-info "Building and starting services"
+info "Starting database services"
+docker compose "${COMPOSE[@]}" up -d postgres redis
+info "Synchronizing PostgreSQL credentials"
+bash scripts/sync-db-password.sh
+info "Building and starting application services"
 docker compose "${COMPOSE[@]}" up -d --build --remove-orphans
 info "Waiting for the internal API"
 for _ in $(seq 1 120); do
@@ -127,7 +131,12 @@ for _ in $(seq 1 120); do
   fi
   sleep 2
 done
-[[ "${INTERNAL_READY:-0}" == 1 ]] || die "API health check failed. Run scripts/doctor.sh."
+if [[ "${INTERNAL_READY:-0}" != 1 ]]; then
+  warn "API health check failed."
+  docker compose "${COMPOSE[@]}" ps
+  docker compose "${COMPOSE[@]}" logs --tail=80 api >&2 || true
+  exit 1
+fi
 
 if curl -fsS --max-time 10 "${HTTPS}${DOMAIN}/health" >/dev/null 2>&1; then
   info "Configuring Telegram webhook and menu"
