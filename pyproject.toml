@@ -8,3 +8,11 @@ requires-python=">=3.12"
 dependencies=["fastapi>=0.115,<1","uvicorn[standard]>=0.32,<1","sqlalchemy>=2,<3","psycopg[binary]>=3.2,<4","pydantic-settings>=2.7,<3","httpx>=0.28,<1","redis>=5,<6","prometheus-client>=0.21,<1","cryptography>=44,<46"]
 [tool.setuptools.packages.find]
 where=["src"]
+[project.optional-dependencies]
+test=["pytest>=8,<9","fakeredis>=2.24,<3","pgserver>=0.1,<0.2"]
+[tool.pytest.ini_options]
+pythonpath=["src"]
+testpaths=["tests"]
+addopts="-q --strict-markers"
+markers=["integration: requires a real PostgreSQL database","slow: concurrency or timing sensitive"]
+filterwarnings=["ignore::DeprecationWarning"]

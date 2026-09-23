@@ -10,3 +10,7 @@ venv/
 *.sqlite*
 backups/
 .DS_Store
+.pgdata/
+.pgdata-test/
+.pgdata*/
+node_modules/
