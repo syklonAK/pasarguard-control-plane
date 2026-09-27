@@ -60,7 +60,7 @@ Telegram ──webhook──> telegram_gateway ──Redis Stream──> telegra
 | حالت | نوشتن |
 |---|---|
 | `pending` | فقط رکورد سفارش؛ نه سازمان، نه حساب، نه دفتر |
-| `quoted` | مدیر قیمت هر گیگ، مبلغ، سقف اعتبار و دستور پرداخت را تعیین می‌کند |
+| `quoted` | مدیر قیمت هر گیگ، مبلغ، سقف اعتبار و دستور پرداخت را تعیین می‌کند؛ سفارشِ پلنی همین مبلغ‌ها را از خود پلن می‌گیرد |
 | `confirmed` / `payment_declared` | مشتری قیمت را می‌پذیرد و پرداخت را اعلام می‌کند |
 | `approved` | سازمان مشتری + عضویت `customer` + `bindings` ساخته می‌شود و مبلغ از `SYSTEM` شارژ می‌گردد |
 | `rejected` / `cancelled` | هیچ اثری روی دفتر نمی‌گذارد |
@@ -68,6 +68,27 @@ Telegram ──webhook──> telegram_gateway ──Redis Stream──> telegra
 بات و وب‌اپ هر دو از یک هسته (`create_panel_order`، `quote_panel_order`، `advance_customer_order`،
 `approve_panel_order` در `web_api.py`) استفاده می‌کنند، پس یک سفارش از هیچ‌کدام از دو مسیر
 میان‌بُر ندارد.
+
+## کاتالوگ پلن
+
+`plan_categories` (دستهٔ داخلی هر سازمان، با `UniqueConstraint(organization_id, name)`) و `plans`
+(بستهٔ قیمت‌گذاری‌شده روی یک سرور) دو جدول کنار هم‌اند؛ `PanelOrder.plan_id` انتخاب مشتری از همین
+کاتالوگ است و `panel_orders` بدون آن همان مسیر قیمت‌گذاری دستی را می‌رود.
+
+| قاعده | دلیل |
+|---|---|
+| `Plan.amount_irr` یک `@property` است: `price_per_gib_irr × daily_gib × duration_days` | مبلغ ذخیره‌شده می‌تواند با اجزایش اختلاف بگیرد؛ اینجا نمی‌تواند |
+| `create_panel_order` روی مسیر پلنی `user_count`/`daily_gib`/مبلغ کلاینت را دور می‌ریزد و از ردیف پلن می‌خواند، و سفارش را از `quoted` شروع می‌کند | قیمت در سرور تعیین می‌شود، نه در چت یا مرورگر |
+| `saleable_plan_rows` = پلن `active` ∧ دسته `active` ∧ سرور `active` و `saleable` | یک دکمهٔ پنهان بهتر از یک دکمه‌ای است که بعداً ۴۲۲ می‌دهد |
+| `priced_plan` در زمان سفارش دوباره همان سه شرط را بررسی می‌کند | دیدِ لیست یک لحظه است؛ خرید لحظه‌ای دیگر |
+| `validated_plan` → `owned_panel` + `catalog_shelf` | پلن فقط روی سرورِ مالک و در دستهٔ خودش می‌نشیند؛ سرور دیگر ⇒ `404` |
+| `DELETE` دستهٔ پر ⇒ `409`؛ `DELETE` پلنِ دارای سفارش ⇒ `409` | تاریخچهٔ قیمت یک سفارشِ پرداخت‌شده نباید ناپدید شود؛ بستن به جای حذف |
+| `credit_limit_irr` صفرِ پلن در سفارش به مبلغ پلن تبدیل می‌شود | «خودکار» در ربات همان چیزی است که در کد نوشته شده، نه یک رفتار پنهان |
+| `approve_panel_order(attach=OrderApproveIn(...))` | سفارش پلنی مرحلهٔ قیمت‌گذاری را نمی‌بیند، پس شناسهٔ Admin همان‌جا که پرداخت تأیید می‌شود پرسیده می‌شود |
+
+همهٔ نوشتن‌ها پشت `manage_catalog` (فقط `system_admin` و `reseller_admin`)‌اند و از یک تابع مشترک
+در `web_api.py` می‌گذرند؛ `catalog_list`، `create_shelf` و `save_plan` در ربات همان
+`create_plan_category` و `create_catalog_plan` را صدا می‌زنند.
 
 ## دسترسی‌ها
 
