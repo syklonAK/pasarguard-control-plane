@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#07111f">
 <title>PasarGuard Control</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/app/styles.css?v=20260927-1">
+<link rel="stylesheet" href="/app/styles.css?v=20260927-2">
 </head>
 <body>
 <div class="ambient one"></div>
@@ -28,6 +28,7 @@
     <button data-page="orders" data-area="staff"><i>🧾</i><span>سفارش‌ها</span><em id="order-badge" class="hidden">0</em></button>
     <button data-page="network" data-area="staff"><i>👥</i><span>نمایندگان</span><em id="network-badge">0</em></button>
     <button data-page="servers" data-area="staff"><i>🗄</i><span>سرورها و نودها</span></button>
+    <button data-page="catalog" data-area="staff" data-permission="manage_catalog"><i>🏷</i><span>کاتالوگ پلن</span></button>
     <button data-page="finance"><i>💳</i><span>امور مالی</span><em id="fund-badge" class="hidden">0</em></button>
     <button data-page="account"><i>⚙</i><span>حساب و پشتیبانی</span></button>
   </nav>
@@ -87,6 +88,7 @@
     <button data-nav="store" data-area="customer"><span>🛒</span><b>سفارش پنل</b><small>ثبت درخواست و پیگیری قیمت‌گذاری</small></button>
     <button data-nav="servers" data-area="staff"><span>🗄</span><b>مدیریت سرورها</b><small>پنل‌ها، نودها و اتصال مجدد</small></button>
     <button data-nav="orders" data-area="staff"><span>🧾</span><b>سفارش‌های پنل</b><small>بررسی، قیمت‌گذاری و تأیید پرداخت</small></button>
+    <button data-nav="catalog" data-area="staff" data-permission="manage_catalog"><span>🏷</span><b>کاتالوگ پلن</b><small>دسته‌بندی و قیمت‌های آمادهٔ فروش</small></button>
     <button data-nav="network" data-area="staff"><span>👥</span><b>شبکه نمایندگان</b><small>قیمت، اعتبار و حساب تلگرام</small></button>
     <button data-nav="finance"><span>💳</span><b>مرکز مالی</b><small>درخواست‌ها و گردش حساب</small></button>
     <button data-nav="account"><span>🛟</span><b>وضعیت سیستم</b><small>پشتیبانی و ابزارهای نگهداری</small></button>
@@ -124,8 +126,9 @@
   </div>
   <div class="notice">
     <span>ℹ️</span>
-    <div><b>فرآیند سفارش</b><p>شما تعداد کاربر و مصرف روزانهٔ مورد نیاز را اعلام می‌کنید؛ مدیر مجموعه سقف اعتبار و قیمت هر گیگابایت را تعیین می‌کند، اطلاعات پرداخت را می‌بینید و پس از تأیید واریز، حساب پنل شما ساخته می‌شود.</p></div>
+    <div><b>دو راه برای خرید</b><p>پلن‌های آماده را می‌توانید همین حالا با قیمت مشخص سفارش دهید؛ اگر سروری را بدون پلن انتخاب کنید، مدیر مجموعه مصرف روزانه و تعداد کاربر شما را می‌خواند و قیمت را دستی تعیین می‌کند. در هر دو حالت پس از تأیید واریز، حساب پنل شما ساخته می‌شود.</p></div>
   </div>
+  <div id="store-plans" class="card-list"></div>
   <div id="my-orders" class="card-list"><div class="skeleton"></div></div>
 </section>
 
@@ -182,6 +185,24 @@
     </div>
     <div id="user-list" class="card-list"></div>
   </div>
+</section>
+
+<section id="catalog" class="page" data-area="staff" data-permission="manage_catalog">
+  <div class="section-head">
+    <div><small>قیمت‌های آماده</small><h2>کاتالوگ پلن</h2></div>
+    <div class="head-actions">
+      <button class="btn glass" data-action="category">+ دسته جدید</button>
+      <button class="btn primary" data-action="plan">+ پلن جدید</button>
+    </div>
+  </div>
+  <div class="notice">
+    <span>🏷</span>
+    <div><b>پلن، قیمت قطعی فروش است</b><p>مبلغ هر پلن از قیمت هر گیگابایت، مصرف روزانه و مدت محاسبه می‌شود و در لحظهٔ سفارش از خود پلن خوانده می‌شود؛ مشتری نمی‌تواند مبلغی را تغییر دهد. پلن فقط روی سرور «آمادهٔ فروش» و در دستهٔ باز به خریدار نشان داده می‌شود. پلنِ خریداری‌شده حذف نمی‌شود، فقط بسته می‌شود.</p></div>
+  </div>
+  <div class="subhead"><h3>دسته‌بندی‌ها</h3><span id="category-count">—</span></div>
+  <div id="category-list" class="card-list"><div class="skeleton"></div></div>
+  <div class="subhead"><h3>پلن‌ها</h3><span id="plan-count">—</span></div>
+  <div id="plan-list" class="card-list"><div class="skeleton"></div></div>
 </section>
 
 <section id="finance" class="page">
@@ -250,6 +271,7 @@
   <button data-page="orders" data-area="staff"><i>🧾</i><span>سفارش‌ها</span></button>
   <button data-page="network" data-area="staff"><i>👥</i><span>نمایندگان</span></button>
   <button data-page="servers" data-area="staff"><i>🗄</i><span>سرورها</span></button>
+  <button data-page="catalog" data-area="staff" data-permission="manage_catalog"><i>🏷</i><span>کاتالوگ</span></button>
   <button data-page="finance"><i>💳</i><span>مالی</span></button>
   <button data-page="account"><i>⚙</i><span>حساب</span></button>
 </nav>
@@ -282,6 +304,6 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
-<script src="/app/app.js?v=20260927-1"></script>
+<script src="/app/app.js?v=20260927-2"></script>
 </body>
 </html>

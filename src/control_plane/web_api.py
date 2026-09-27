@@ -19,8 +19,9 @@ from sqlalchemy.orm import Session
 
 from .app import (
     Account, Actor, ApprovalRequest, AuditLog, Binding, Checkpoint, Closure, Contract, Entry,
-    FundingRequest, Membership, ORDER_STATES, Organization, Panel, PanelOrder, PanelOwner, SystemSetting, Transaction,
-    account, assert_depth_allowed, audit, balance, configured_root_id, db,
+    FundingRequest, Membership, ORDER_STATES, Organization, Panel, PanelOrder, PanelOwner, Plan, PlanCategory,
+    SystemSetting, Transaction,
+    account, assert_depth_allowed, assert_vendor, audit, balance, configured_root_id, db,
     effective_role, membership_for, now, put_setting, transfer, validate_panel_url, web_identity,
 )
 from .rbac import can, denial_fa, permission_payload, role_fa
@@ -137,6 +138,7 @@ def accessible_panel(s: Session, panel_id: str, organization_id: str):
 
 
 def panel_client(panel: Panel):
+    assert_vendor(panel)
     return Client(panel.base_url, resolve_secret(panel.api_key_ref), resolve_secret(panel.owner_user_ref), resolve_secret(panel.owner_pass_ref), panel.verify_tls)
 
 
@@ -760,6 +762,8 @@ def web_audit(limit: int = 50, identity=Depends(web_identity), s: Session = Depe
 class OrderIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     panel_id: str
+    # A published plan prices the order itself; leaving it empty asks the seller to quote by hand.
+    plan_id: str | None = None
     business_name: str = Field(min_length=2, max_length=160)
     user_count: int = Field(gt=0, le=100_000)
     daily_gib: int = Field(gt=0, le=100_000)
@@ -780,6 +784,13 @@ class OrderQuoteIn(BaseModel):
 class OrderRejectIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(default="", max_length=500)
+
+
+class OrderApproveIn(BaseModel):
+    """A plan order never passes through the quote form, so the panel account can arrive here."""
+    model_config = ConfigDict(extra="forbid")
+    pg_admin_id: int | None = Field(default=None, gt=0)
+    admin_username: str | None = Field(default=None, max_length=80)
 
 
 ORDER_FLOW: dict[str, set[str]] = {
@@ -822,8 +833,12 @@ def unique_order_slug(s: Session) -> str:
 
 def order_row(s: Session, order: PanelOrder) -> dict:
     panel = s.get(Panel, order.panel_id)
+    plan = s.get(Plan, order.plan_id) if order.plan_id else None
     return {"id": order.id, "status": order.status, "business_name": order.business_name, "slug": order.slug,
             "panel_id": order.panel_id, "panel_name": panel.name if panel else None,
+            "plan_id": order.plan_id, "plan_name": plan.name if plan else None,
+            "duration_days": plan.duration_days if plan else None,
+            "pg_admin_id": order.pg_admin_id, "admin_username": order.admin_username,
             "user_count": order.user_count, "daily_gib": order.daily_gib, "note": order.note,
             "amount_irr": order.amount_irr, "credit_limit_irr": order.credit_limit_irr,
             "price_per_gib_irr": order.price_per_gib_irr, "payment_instructions": order.payment_instructions,
@@ -849,26 +864,71 @@ def panel_saleable_rows(s: Session):
     return [{"id": p.id, "name": p.name} for p in rows]
 
 
+def plan_row(plan: Plan, panel_name: str | None = None) -> dict:
+    return {"id": plan.id, "name": plan.name, "description": plan.description, "panel_id": plan.panel_id,
+            "panel_name": panel_name, "category_id": plan.category_id, "price_per_gib_irr": plan.price_per_gib_irr,
+            "daily_gib": plan.daily_gib, "duration_days": plan.duration_days, "user_count": plan.user_count,
+            "credit_limit_irr": plan.credit_limit_irr, "payment_instructions": plan.payment_instructions,
+            "amount_irr": plan.amount_irr, "status": plan.status}
+
+
+def saleable_plan_rows(s: Session):
+    """What a stranger may buy now: a published plan, on an open shelf, on a server that is on sale."""
+    panels = {p.id: p.name for p in s.scalars(select(Panel).where(Panel.status == "active",
+                                                                  Panel.saleable.is_(True))).all()}
+    shelves = {c.id for c in s.scalars(select(PlanCategory).where(PlanCategory.status == "active")).all()}
+    rows = []
+    for plan in s.scalars(select(Plan).where(Plan.status == "active").order_by(Plan.price_per_gib_irr)).all():
+        if plan.panel_id not in panels or (plan.category_id and plan.category_id not in shelves):
+            continue
+        rows.append(plan_row(plan, panels[plan.panel_id]))
+    return rows
+
+
+def priced_plan(s: Session, panel: Panel, plan_id: str | None) -> Plan | None:
+    if not plan_id:
+        return None
+    plan = s.get(Plan, plan_id)
+    if not plan or plan.status != "active" or plan.panel_id != panel.id:
+        raise HTTPException(422, "این پلن برای فروش روی این سرور باز نیست")
+    if plan.category_id:
+        shelf = s.get(PlanCategory, plan.category_id)
+        if not shelf or shelf.status != "active" or shelf.organization_id != plan.organization_id:
+            raise HTTPException(422, "این پلن برای فروش باز نیست")
+    return plan
+
+
 @router.get("/v1/webapp/order-options")
 def order_options(identity=Depends(web_identity), s: Session = Depends(db)):
     """What a customer may order from: only servers the owner put on the sale list."""
     order_permission(s, identity, "order_panel")
-    return {"panels": panel_saleable_rows(s)}
+    return {"panels": panel_saleable_rows(s), "plans": saleable_plan_rows(s)}
 
 
 def create_panel_order(s: Session, *, telegram_id: int, display_name: str, via: str, panel_id: str,
-                       business_name: str, user_count: int, daily_gib: int, note: str) -> PanelOrder:
-    """Register a request for a panel. It stays a piece of chat traffic until an admin quotes it."""
+                       business_name: str, user_count: int, daily_gib: int, note: str,
+                       plan_id: str | None = None) -> PanelOrder:
+    """Register a request for a panel. It stays a piece of chat traffic until it is priced."""
     panel = s.get(Panel, panel_id)
     if not panel or panel.status != "active" or not panel.saleable:
         raise HTTPException(422, "این سرور برای سفارش باز نیست")
+    plan = priced_plan(s, panel, plan_id)
     actor = requester_actor(s, telegram_id, business_name or display_name, create=True)
     order = PanelOrder(actor_id=actor.id, panel_id=panel.id, business_name=business_name, slug=unique_order_slug(s),
-                       user_count=user_count, daily_gib=daily_gib, note=note)
+                       user_count=user_count, daily_gib=daily_gib, note=note, plan_id=plan.id if plan else None)
+    if plan:
+        # The catalog is the only price source on this path: whatever the client sent is discarded.
+        order.user_count, order.daily_gib = plan.user_count, plan.daily_gib
+        order.price_per_gib_irr = plan.price_per_gib_irr
+        order.amount_irr = plan.amount_irr
+        order.credit_limit_irr = plan.credit_limit_irr or plan.amount_irr
+        order.payment_instructions = plan.payment_instructions
+        order.status = "quoted"
     s.add(order)
     audit(s, "panel_order.create", "panel_order", order.id, actor_id=actor.id,
-          metadata={"panel_id": panel.id, "slug": order.slug, "user_count": user_count, "daily_gib": daily_gib,
-                    "via": via})
+          metadata={"panel_id": panel.id, "slug": order.slug, "user_count": order.user_count,
+                    "daily_gib": order.daily_gib, "via": via, "plan_id": order.plan_id,
+                    "amount_irr": order.amount_irr})
     return order
 
 
@@ -877,7 +937,7 @@ def create_order(x: OrderIn, identity=Depends(web_identity), s: Session = Depend
     order_permission(s, identity, "order_panel")
     order = create_panel_order(s, telegram_id=identity.user_id, display_name=identity.first_name, via="webapp",
                               panel_id=x.panel_id, business_name=x.business_name, user_count=x.user_count,
-                              daily_gib=x.daily_gib, note=x.note)
+                              daily_gib=x.daily_gib, note=x.note, plan_id=x.plan_id)
     s.commit()
     return order_row(s, order)
 
@@ -1009,7 +1069,8 @@ def reject_order(order_id: str, x: OrderRejectIn, identity=Depends(web_identity)
     return {"id": order.id, "status": order.status}
 
 
-def approve_panel_order(s: Session, order: PanelOrder, reviewer_id: str, seller_org_id: str) -> dict:
+def approve_panel_order(s: Session, order: PanelOrder, reviewer_id: str, seller_org_id: str,
+                        attach: OrderApproveIn | None = None) -> dict:
     """Turn a paid order into a real account: organization, contract, wallet funding and access.
 
     The opening balance is a ledger transfer, so the offline payment is recorded the same way a
@@ -1017,6 +1078,9 @@ def approve_panel_order(s: Session, order: PanelOrder, reviewer_id: str, seller_
     """
     assert_order_seller(s, order, seller_org_id)
     require_transition(order, "approved")
+    if attach and attach.pg_admin_id and not order.pg_admin_id:
+        order.pg_admin_id = attach.pg_admin_id
+        order.admin_username = (attach.admin_username or "").strip()[:80]
     panel = s.get(Panel, order.panel_id)
     parent = s.get(Organization, seller_org_id)
     assert_depth_allowed(s, parent)
@@ -1053,10 +1117,11 @@ def approve_panel_order(s: Session, order: PanelOrder, reviewer_id: str, seller_
 
 
 @router.post("/v1/webapp/orders/{order_id}/approve")
-def approve_order(order_id: str, identity=Depends(web_identity), s: Session = Depends(db)):
+def approve_order(order_id: str, x: OrderApproveIn = OrderApproveIn(), identity=Depends(web_identity),
+                  s: Session = Depends(db)):
     reviewer, _, organization = manager(s, identity.user_id, "decide_orders")
     order = locked_order(s, order_id, "approved")
-    result = approve_panel_order(s, order, reviewer.id, organization.id)
+    result = approve_panel_order(s, order, reviewer.id, organization.id, x)
     s.commit()
     return result
 
@@ -1071,3 +1136,187 @@ def set_panel_saleable(panel_id: str, saleable: bool = True, identity=Depends(we
           metadata={"saleable": saleable})
     s.commit()
     return {"id": panel.id, "saleable": panel.saleable}
+
+
+# --------------------------------------------------------------------------------------
+# The plan catalog: published prices a customer can buy without negotiating
+# --------------------------------------------------------------------------------------
+
+class PlanCategoryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+
+class PlanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    panel_id: str
+    category_id: str | None = None
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    price_per_gib_irr: int = Field(gt=0, le=10_000_000_000_000)
+    daily_gib: int = Field(gt=0, le=100_000)
+    duration_days: int = Field(gt=0, le=3650)
+    user_count: int = Field(gt=0, le=100_000)
+    credit_limit_irr: int = Field(default=0, ge=0)
+    payment_instructions: str = Field(default="", max_length=2000)
+
+
+def catalog_shelf(s: Session, category_id: str, organization_id: str) -> PlanCategory:
+    category = s.get(PlanCategory, category_id)
+    if not category or category.organization_id != organization_id:
+        raise HTTPException(404, "category not found")
+    return category
+
+
+@router.get("/v1/webapp/catalog")
+def web_catalog(identity=Depends(web_identity), s: Session = Depends(db)):
+    _, _, organization = manager(s, identity.user_id, "manage_catalog")
+    categories = s.scalars(select(PlanCategory).where(PlanCategory.organization_id == organization.id)
+                           .order_by(PlanCategory.name)).all()
+    panels = {p.id: p.name for p in s.scalars(select(Panel).join(PanelOwner, PanelOwner.panel_id == Panel.id)
+                                              .where(PanelOwner.organization_id == organization.id)).all()}
+    plans = s.scalars(select(Plan).where(Plan.organization_id == organization.id)
+                      .order_by(Plan.price_per_gib_irr)).all()
+    return {"categories": [{"id": c.id, "name": c.name, "description": c.description, "status": c.status,
+                            "plans": sum(1 for p in plans if p.category_id == c.id)} for c in categories],
+            "plans": [plan_row(p, panels.get(p.panel_id)) for p in plans]}
+
+
+def create_plan_category(s: Session, *, organization_id: str, actor_id: str, x: PlanCategoryIn) -> PlanCategory:
+    if s.scalar(select(PlanCategory.id).where(PlanCategory.organization_id == organization_id,
+                                              PlanCategory.name == x.name)):
+        raise HTTPException(409, "یک دسته با همین نام وجود دارد")
+    category = PlanCategory(organization_id=organization_id, name=x.name, description=x.description)
+    s.add(category)
+    audit(s, "plan_category.create", "plan_category", category.id, actor_id=actor_id, organization_id=organization_id,
+          metadata={"name": x.name})
+    return category
+
+
+@router.post("/v1/webapp/plan-categories")
+def web_create_category(x: PlanCategoryIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    category = create_plan_category(s, organization_id=organization.id, actor_id=actor.id, x=x)
+    s.commit()
+    return {"id": category.id, "name": category.name, "status": category.status}
+
+
+@router.put("/v1/webapp/plan-categories/{category_id}")
+def web_update_category(category_id: str, x: PlanCategoryIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    category = catalog_shelf(s, category_id, organization.id)
+    taken = s.scalar(select(PlanCategory.id).where(PlanCategory.organization_id == organization.id,
+                                                  PlanCategory.name == x.name, PlanCategory.id != category.id))
+    if taken:
+        raise HTTPException(409, "یک دسته با همین نام وجود دارد")
+    category.name, category.description = x.name, x.description
+    audit(s, "plan_category.update", "plan_category", category.id, actor_id=actor.id, organization_id=organization.id,
+          metadata={"name": x.name})
+    s.commit()
+    return {"id": category.id, "name": category.name, "status": category.status}
+
+
+def set_catalog_status(s: Session, *, organization_id: str, actor_id: str, kind: str, target_id: str,
+                       status: str) -> str:
+    """Closing a shelf hides every plan on it; the plans themselves stay as they were."""
+    if status not in ("active", "inactive"):
+        raise HTTPException(422, "status must be active or inactive")
+    action, table = {"category": ("plan_category.status", "plan_category"), "plan": ("plan.status", "plan")}[kind]
+    row = catalog_shelf(s, target_id, organization_id) if kind == "category" else catalog_plan(s, target_id,
+                                                                                                organization_id)
+    row.status = status
+    audit(s, action, table, target_id, actor_id=actor_id, organization_id=organization_id, metadata={"status": status})
+    return status
+
+
+@router.post("/v1/webapp/plan-categories/{category_id}/status")
+def web_category_status(category_id: str, status: str = "active", identity=Depends(web_identity),
+                        s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    status = set_catalog_status(s, organization_id=organization.id, actor_id=actor.id, kind="category",
+                                target_id=category_id, status=status)
+    s.commit()
+    return {"id": category_id, "status": status}
+
+
+@router.delete("/v1/webapp/plan-categories/{category_id}")
+def web_delete_category(category_id: str, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    category = catalog_shelf(s, category_id, organization.id)
+    if s.scalar(select(Plan.id).where(Plan.category_id == category.id)):
+        raise HTTPException(409, "این دسته هنوز پلن دارد؛ اول پلن‌ها را منتقل یا حذف کنید")
+    s.delete(category)
+    audit(s, "plan_category.delete", "plan_category", category_id, actor_id=actor.id, organization_id=organization.id)
+    s.commit()
+    return {"deleted": category_id}
+
+
+def catalog_plan(s: Session, plan_id: str, organization_id: str) -> Plan:
+    plan = s.get(Plan, plan_id)
+    if not plan or plan.organization_id != organization_id:
+        raise HTTPException(404, "plan not found")
+    return plan
+
+
+def validated_plan(s: Session, x: PlanIn, organization_id: str) -> Panel:
+    """A plan may only sit on a server the seller owns, and on a shelf of their own."""
+    if x.category_id:
+        catalog_shelf(s, x.category_id, organization_id)
+    return owned_panel(s, x.panel_id, organization_id)
+
+
+def create_catalog_plan(s: Session, *, organization_id: str, actor_id: str, x: PlanIn) -> Plan:
+    panel = validated_plan(s, x, organization_id)
+    plan = Plan(organization_id=organization_id, panel_id=panel.id, category_id=x.category_id, name=x.name,
+                description=x.description, price_per_gib_irr=x.price_per_gib_irr, daily_gib=x.daily_gib,
+                duration_days=x.duration_days, user_count=x.user_count, credit_limit_irr=x.credit_limit_irr,
+                payment_instructions=x.payment_instructions)
+    s.add(plan)
+    audit(s, "plan.create", "plan", plan.id, actor_id=actor_id, organization_id=organization_id,
+          metadata={"panel_id": panel.id, "name": x.name, "amount_irr": plan.amount_irr})
+    return plan
+
+
+@router.post("/v1/webapp/plans")
+def web_create_plan(x: PlanIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    plan = create_catalog_plan(s, organization_id=organization.id, actor_id=actor.id, x=x)
+    s.commit()
+    return plan_row(plan, s.get(Panel, plan.panel_id).name)
+
+
+@router.put("/v1/webapp/plans/{plan_id}")
+def web_update_plan(plan_id: str, x: PlanIn, identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    plan = catalog_plan(s, plan_id, organization.id)
+    panel = validated_plan(s, x, organization.id)
+    plan.panel_id, plan.category_id, plan.name, plan.description = panel.id, x.category_id, x.name, x.description
+    plan.price_per_gib_irr, plan.daily_gib, plan.duration_days = x.price_per_gib_irr, x.daily_gib, x.duration_days
+    plan.user_count, plan.credit_limit_irr, plan.payment_instructions = x.user_count, x.credit_limit_irr, x.payment_instructions
+    audit(s, "plan.update", "plan", plan.id, actor_id=actor.id, organization_id=organization.id,
+          metadata={"panel_id": panel.id, "name": x.name, "amount_irr": plan.amount_irr})
+    s.commit()
+    return plan_row(plan, panel.name)
+
+
+@router.post("/v1/webapp/plans/{plan_id}/status")
+def web_plan_status(plan_id: str, status: str = "active", identity=Depends(web_identity), s: Session = Depends(db)):
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    status = set_catalog_status(s, organization_id=organization.id, actor_id=actor.id, kind="plan",
+                                target_id=plan_id, status=status)
+    s.commit()
+    return {"id": plan_id, "status": status}
+
+
+@router.delete("/v1/webapp/plans/{plan_id}")
+def web_delete_plan(plan_id: str, identity=Depends(web_identity), s: Session = Depends(db)):
+    """An order keeps its price history, so a plan that was ever bought is only ever closed."""
+    actor, _, organization = manager(s, identity.user_id, "manage_catalog")
+    plan = catalog_plan(s, plan_id, organization.id)
+    if s.scalar(select(PanelOrder.id).where(PanelOrder.plan_id == plan.id)):
+        raise HTTPException(409, "این پلن سفارش دارد؛ فقط می‌توان آن را بست")
+    s.delete(plan)
+    audit(s, "plan.delete", "plan", plan_id, actor_id=actor.id, organization_id=organization.id)
+    s.commit()
+    return {"deleted": plan_id}

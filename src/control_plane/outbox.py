@@ -15,7 +15,7 @@ from decimal import Decimal
 import httpx
 from sqlalchemy import select
 
-from .app import Actor, Binding, Membership, Organization, Outbox, Panel, SessionLocal, now, uid
+from .app import Actor, Binding, Membership, Organization, Outbox, Panel, SessionLocal, assert_vendor, now, uid
 
 MAX_ATTEMPTS = int(os.getenv("OUTBOX_MAX_ATTEMPTS", "8"))
 BASE_BACKOFF_SECONDS = int(os.getenv("OUTBOX_BACKOFF_SECONDS", "15"))
@@ -106,6 +106,7 @@ def panel_client(s, panel: Panel):
     from .pasarguard import Client
     from .secrets import resolve_secret
 
+    assert_vendor(panel)
     return Client(panel.base_url, resolve_secret(panel.api_key_ref), resolve_secret(panel.owner_user_ref),
                   resolve_secret(panel.owner_pass_ref), panel.verify_tls)
 

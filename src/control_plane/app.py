@@ -75,6 +75,9 @@ class Panel(Base):
     __tablename__="panels"
     id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
     name:Mapped[str]=mapped_column(String(120)); base_url:Mapped[str]=mapped_column(String(500))
+    # Which upstream API speaks for this server. One column keeps a second vendor a new client
+    # class instead of a rewrite of every panel route.
+    vendor:Mapped[str]=mapped_column(String(32),default="pasarguard",server_default="pasarguard")
     api_key_ref:Mapped[str|None]=mapped_column(Text); owner_user_ref:Mapped[str|None]=mapped_column(Text); owner_pass_ref:Mapped[str|None]=mapped_column(Text)
     usage_coefficient:Mapped[Decimal]=mapped_column(Numeric(10,4),default=Decimal("1"),server_default="1.0000")
     verify_tls:Mapped[bool]=mapped_column(Boolean,default=True,server_default="true"); status:Mapped[str]=mapped_column(String(24),default="active",server_default="active")
@@ -85,6 +88,36 @@ class PanelOwner(Base):
     __tablename__="panel_owners"
     panel_id:Mapped[str]=mapped_column(ForeignKey("panels.id"),primary_key=True)
     organization_id:Mapped[str]=mapped_column(ForeignKey("organizations.id"),index=True)
+class PlanCategory(Base):
+    """A seller's own shelf label for plans; two organizations may both call one «operator»."""
+    __tablename__="plan_categories"; __table_args__=(UniqueConstraint("organization_id","name"),)
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    organization_id:Mapped[str]=mapped_column(ForeignKey("organizations.id"),index=True)
+    name:Mapped[str]=mapped_column(String(80)); description:Mapped[str]=mapped_column(String(500),default="",server_default="")
+    status:Mapped[str]=mapped_column(String(24),default="active",server_default="active")
+    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
+class Plan(Base):
+    """A priced package published on one server: what the customer buys without negotiation.
+
+    The price is never stored as a total. Volume, duration and the per-GiB rate stay separate so
+    a review can show what a number is made of, and the amount is recomputed on every read.
+    """
+    __tablename__="plans"
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    organization_id:Mapped[str]=mapped_column(ForeignKey("organizations.id"),index=True)
+    panel_id:Mapped[str]=mapped_column(ForeignKey("panels.id"),index=True)
+    category_id:Mapped[str|None]=mapped_column(ForeignKey("plan_categories.id"))
+    name:Mapped[str]=mapped_column(String(120)); description:Mapped[str]=mapped_column(String(1000),default="",server_default="")
+    price_per_gib_irr:Mapped[int]=mapped_column(BigInteger); daily_gib:Mapped[int]=mapped_column(Integer)
+    duration_days:Mapped[int]=mapped_column(Integer); user_count:Mapped[int]=mapped_column(Integer)
+    credit_limit_irr:Mapped[int]=mapped_column(BigInteger,default=0,server_default="0")
+    payment_instructions:Mapped[str]=mapped_column(Text,default="",server_default="")
+    status:Mapped[str]=mapped_column(String(24),default="active",server_default="active")
+    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
+
+    @property
+    def amount_irr(self)->int:
+        return int(self.price_per_gib_irr)*int(self.daily_gib)*int(self.duration_days)
 class Binding(Base):
     __tablename__="bindings"; __table_args__=(UniqueConstraint("panel_id","pg_admin_id"),)
     id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
@@ -146,6 +179,8 @@ class PanelOrder(Base):
     id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
     actor_id:Mapped[str]=mapped_column(ForeignKey("actors.id"),index=True)
     panel_id:Mapped[str]=mapped_column(ForeignKey("panels.id"),index=True)
+    # Set when the customer bought a published plan: the price then comes from the catalog, not chat.
+    plan_id:Mapped[str|None]=mapped_column(ForeignKey("plans.id"))
     business_name:Mapped[str]=mapped_column(String(160)); slug:Mapped[str]=mapped_column(String(80),unique=True)
     user_count:Mapped[int]=mapped_column(Integer); daily_gib:Mapped[int]=mapped_column(Integer)
     note:Mapped[str]=mapped_column(String(500),default="",server_default="")
@@ -227,6 +262,10 @@ def validate_panel_url(url:str)->None:
     if parsed.scheme!="https":raise HTTPException(422,"server URL must use HTTPS")
     if not parsed.hostname:raise HTTPException(422,"server URL must include a hostname")
     if parsed.username or parsed.password:raise HTTPException(422,"credentials are not allowed in the server URL")
+SUPPORTED_VENDORS=("pasarguard",)
+def assert_vendor(panel:Panel)->None:
+    """Refuse to knock on a door no client knows how to open, instead of guessing the API."""
+    if panel.vendor not in SUPPORTED_VENDORS:raise HTTPException(422,f="پشتیبانی از پنل «{panel.vendor}» هنوز اضافه نشده است")
 def depth_of(s:Session,org_id:str)->int:
     return int(s.scalar(select(func.max(Closure.depth)).where(Closure.descendant_id==org_id)) or 0)
 def effective_depth_limit(s:Session,parent:Organization)->int:

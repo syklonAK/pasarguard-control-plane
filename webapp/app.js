@@ -12,14 +12,16 @@ const qa = s => [...document.querySelectorAll(s)];
 const num = v => new Intl.NumberFormat('fa-IR').format(Number(v || 0));
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
 const money = n => num(n) + ' ریال';
+const num0 = v => (v === undefined || v === null ? '' : String(v));
 const size = n => { let v = Number(n || 0), i = 0, u = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']; while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ } return new Intl.NumberFormat('fa-IR', { maximumFractionDigits: i > 2 ? 2 : 0 }).format(v) + ' ' + u[i] };
 const date = v => v ? new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(v)) : '—';
 const notice = message => `<div class="notice">${esc(message)}</div>`;
 
 let state = {
-  caps: null, dashboard: null, mode: '', resellers: [], saleable: [], myOrders: [],
+  caps: null, dashboard: null, mode: '', resellers: [], saleable: [], myOrders: [], storePlans: [],
   panelId: '', panelName: '', nodeName: '', userOffset: 0, myPanelId: '', myOffset: 0,
-  queue: 'pending', contextOrder: null,
+  queue: 'pending', contextOrder: null, catalog: { categories: [], plans: [] }, ownedPanels: [],
+  contextPlan: null, contextCategory: null,
 };
 
 async function api(path, options = {}) {
@@ -62,10 +64,11 @@ function orderSteps(order) {
 
 function orderMeta(order) {
   const quote = order.amount_irr ? ` · مبلغ: <b>${money(order.amount_irr)}</b> · هر گیگ: ${money(order.price_per_gib_irr)}` : '';
+  const plan = order.plan_name ? `پلن <b>${esc(order.plan_name)}</b>${order.duration_days ? ` · ${num(order.duration_days)} روز` : ''}<br>` : '';
   const paid = order.status === 'quoted' && order.payment_instructions
     ? `<br><span class="quote-box">${esc(order.payment_instructions)}</span>` : '';
   const refused = order.rejection_reason ? `<br><span class="quote-box bad">${esc(order.rejection_reason)}</span>` : '';
-  return `سرور ${esc(order.panel_name || '—')} · ${num(order.user_count)} کاربر · ${num(order.daily_gib)} گیگابایت روزانه${quote}${paid}${refused}<br><small>${date(order.created_at)}</small>`;
+  return plan + `سرور ${esc(order.panel_name || '—')} · ${num(order.user_count)} کاربر · ${num(order.daily_gib)} گیگابایت روزانه${quote}${paid}${refused}<br><small>${date(order.created_at)}</small>`;
 }
 
 function orderActions(order) {
@@ -96,12 +99,24 @@ async function loadStore() {
   try {
     if (preview) {
       state.saleable = [{ id: 'demo', name: 'سرور نمایشی پاسارگارد' }];
+      state.storePlans = [{ id: 'demo-plan', panel_id: 'demo', panel_name: 'سرور نمایشی', name: 'پلن ۳۰ روزه اقتصادی', description: 'مناسب شروع', user_count: 5, daily_gib: 10, duration_days: 30, price_per_gib_irr: 25000, amount_irr: 7500000, credit_limit_irr: 0, payment_instructions: 'کارت نمایشی', status: 'active' }];
       state.myOrders = [{ id: 'demo', status: 'quoted', business_name: 'کسب‌وکار نمایشی', panel_name: 'سرور نمایشی', user_count: 50, daily_gib: 3, amount_irr: 5000000, price_per_gib_irr: 12000, payment_instructions: 'کارت نمایشی', created_at: new Date() }];
     } else {
       const [options, rows] = await Promise.all([api('/v1/webapp/order-options'), api('/v1/webapp/orders')]);
       state.saleable = options.panels || [];
+      state.storePlans = options.plans || [];
       state.myOrders = rows;
     }
+    $('store-plans').innerHTML = state.storePlans.length
+      ? `<div class="subhead"><h3>پلن‌های آماده</h3><span>${num(state.storePlans.length)} پلن</span></div>`
+        + state.storePlans.map(p => card(p.name, `روی ${esc(p.panel_name || '—')}${p.description ? ` · ${esc(p.description)}` : ''}`
+          + planChips(p) + (p.payment_instructions ? `<br><span class="quote-box">${esc(p.payment_instructions)}</span>` : ''),
+          `<b>${money(p.amount_irr)}</b><button class="btn primary" data-buy="${p.id}">سفارش این پلن</button>`)).join('')
+      : '';
+    qa('#store-plans [data-buy]').forEach(btn => btn.onclick = () => {
+      const plan = state.storePlans.find(p => p.id === btn.dataset.buy);
+      if (plan) openModal('planOrder', plan);
+    });
     const list = state.myOrders.map(o => card(`${o.business_name} — ${STATUS_FA[o.status] || o.status}`, orderMeta(o) + orderSteps(o), orderActions(o))).join('');
     $('my-orders').innerHTML = list || '<div class="notice"><span>🛒</span><div><b>سفارشی ثبت نکرده‌اید</b><p>با دکمهٔ «ثبت سفارش جدید» تعداد کاربر و مصرف روزانهٔ خود را اعلام کنید.</p></div></div>';
     bindOrderButtons('my-orders');
@@ -121,18 +136,14 @@ async function loadQueue() {
         ? `<button class="btn primary" data-review="quote" data-order="${order.id}">قیمت‌گذاری</button><button class="ghost danger" data-review="reject" data-order="${order.id}">رد</button>`
         : `<span class="badge">در انتظار مشتری</span><button class="ghost danger" data-review="reject" data-order="${order.id}">رد</button>`;
     $('order-list').innerHTML = rows.length
-      ? rows.map(o => card(`${o.business_name} · ${num(o.user_count)} کاربر`, `${esc(o.panel_name || '')} — ${num(o.daily_gib)} گیگابایت روزانه${o.amount_irr ? ` · قیمت: <b>${money(o.amount_irr)}</b>` : ''}<br><i>${esc(o.note || 'بدون توضیح')}</i><br><small>${date(o.created_at)}</small>`, actions(o))).join('')
+      ? rows.map(o => card(`${o.business_name} · ${num(o.user_count)} کاربر`, `${esc(o.panel_name || '')} — ${num(o.daily_gib)} گیگابایت روزانه${o.plan_name ? ` · پلن <b>${esc(o.plan_name)}</b>` : ''}${o.amount_irr ? ` · قیمت: <b>${money(o.amount_irr)}</b>` : ''}<br><i>${esc(o.note || 'بدون توضیح')}</i><br><small>${date(o.created_at)}</small>`, actions(o))).join('')
       : '<div class="notice">سفارشی در این وضعیت وجود ندارد.</div>';
     qa('#order-list [data-review]').forEach(btn => btn.onclick = async () => {
       const order = rows.find(o => o.id === btn.dataset.order);
       if (btn.dataset.review === 'quote') return openModal('quote', order);
       if (btn.dataset.review === 'reject') return openModal('rejectOrder', order);
-      btn.disabled = true;
-      try {
-        const result = await api(`/v1/webapp/orders/${btn.dataset.order}/approve`, { method: 'POST' });
-        toast(result.bound ? `حساب ساخته شد و روی ${result.panel_name} متصل است` : 'سازمان ساخته شد؛ برای اتصال پنل، Admin ID را ثبت کنید');
-        await Promise.all([loadQueue(), loadDashboard()]);
-      } catch (error) { toast(error.message, true) } finally { btn.disabled = false }
+      // Approval is the one action that moves money, so the admin id is confirmed on the way in.
+      openModal('attach', order);
     });
   } catch (error) { $('order-list').innerHTML = notice(error.message) }
 }
@@ -147,9 +158,58 @@ async function loadOrderBadge() {
 }
 
 // --------------------------------------------------------------------------------------
-// The customer area: the bound server and its subscribers
+// Plan catalog: the seller fixes a price once, every buyer orders from that row
 // --------------------------------------------------------------------------------------
 
+const planChips = p => `<span class="plan-meta">${[`${num(p.user_count)} کاربر`, `${num(p.daily_gib)} گیگ روزانه`, `${num(p.duration_days)} روز`, `هر گیگ ${money(p.price_per_gib_irr)}`].map(x => `<em>${x}</em>`).join('')}</span>`;
+
+async function loadCatalog() {
+  loading('category-list', 1); loading('plan-list', 2);
+  try {
+    const data = preview
+      ? { categories: [{ id: 'c1', name: 'پلن‌های ماهانه', description: 'سیزده روزه تا یک ماه', status: 'active', plans: 1 }],
+          plans: [{ id: 'p1', name: 'پلن ۳۰ روزه اقتصادی', description: 'مناسب شروع', panel_id: 'demo', panel_name: 'سرور اصلی پاسارگارد', category_id: 'c1', user_count: 5, daily_gib: 10, duration_days: 30, price_per_gib_irr: 25000, amount_irr: 7500000, credit_limit_irr: 0, payment_instructions: 'کارت نمایشی', status: 'active' }] }
+      : await api('/v1/webapp/catalog');
+    state.catalog = { categories: data.categories || [], plans: data.plans || [] };
+    if (!preview && perm('manage_servers')) state.ownedPanels = await api('/v1/webapp/panels');
+    $('category-count').textContent = `${num(state.catalog.categories.length)} دسته`;
+    $('plan-count').textContent = `${num(state.catalog.plans.length)} پلن`;
+    const shelf = c => card(c.name, `${esc(c.description || 'بدون توضیح')} · ${num(c.plans)} پلن`,
+      `<span class="badge ${c.status === 'active' ? 'on' : 'off'}">${c.status === 'active' ? 'باز' : 'بسته'}</span>`
+      + `<button class="ghost" data-shelf="${c.id}" data-status="${c.status === 'active' ? 'inactive' : 'active'}">${c.status === 'active' ? 'بستن دسته' : 'باز کردن دسته'}</button>`
+      + `<button class="ghost" data-edit-category="${c.id}">ویرایش</button>`
+      + `<button class="ghost danger" data-del-category="${c.id}">حذف</button>`);
+    const plan = p => card(p.name, `روی ${esc(p.panel_name || '—')}${p.description ? ` · ${esc(p.description)}` : ''}` + planChips(p),
+      `<span class="badge ${p.status === 'active' ? 'on' : 'off'}">${p.status === 'active' ? 'قابل خرید' : 'بسته'}</span>`
+      + `<b>${money(p.amount_irr)}</b>`
+      + `<button class="ghost" data-plan="${p.id}" data-status="${p.status === 'active' ? 'inactive' : 'active'}">${p.status === 'active' ? 'بستن پلن' : 'باز کردن پلن'}</button>`
+      + `<button class="ghost" data-edit-plan="${p.id}">ویرایش</button>`
+      + `<button class="ghost danger" data-del-plan="${p.id}">حذف</button>`);
+    $('category-list').innerHTML = state.catalog.categories.length ? state.catalog.categories.map(shelf).join('')
+      : '<div class="notice">دسته‌ای نساخته‌اید؛ دسته فقط قفسه‌ای است که پلن‌ها رویش چیده می‌شوند.</div>';
+    $('plan-list').innerHTML = state.catalog.plans.length ? state.catalog.plans.map(plan).join('')
+      : '<div class="notice">هنوز پلنی نساخته‌اید. تا پلن روی سرور «آمادهٔ فروش» نرود، مشتری آن را نمی‌بیند.</div>';
+    const run = (selector, path, body, done, ask) => qa(selector).forEach(btn => btn.onclick = async () => {
+      if (ask && !confirm(ask)) return;
+      btn.disabled = true;
+      try { await api(path(btn.dataset), body); toast(done); await loadCatalog() }
+      catch (error) { toast(error.message, true) } finally { btn.disabled = false }
+    });
+    run('[data-shelf]', d => `/v1/webapp/plan-categories/${d.shelf}/status?status=${d.status}`, { method: 'POST' }, 'دسته به‌روز شد');
+    run('[data-plan]', d => `/v1/webapp/plans/${d.plan}/status?status=${d.status}`, { method: 'POST' }, 'پلن به‌روز شد');
+    run('[data-del-category]', d => `/v1/webapp/plan-categories/${d.delCategory}`, { method: 'DELETE' }, 'دسته حذف شد', 'این دسته حذف شود؟ فقط دستهٔ خالی قابل حذف است.');
+    run('[data-del-plan]', d => `/v1/webapp/plans/${d.delPlan}`, { method: 'DELETE' }, 'پلن حذف شد', 'این پلن حذف شود؟ پلنی که سفارش داشته باشد فقط بسته می‌شود.');
+    qa('[data-edit-category]').forEach(btn => btn.onclick = () => openModal('category', state.catalog.categories.find(c => c.id === btn.dataset.editCategory)));
+    qa('[data-edit-plan]').forEach(btn => btn.onclick = () => openModal('plan', state.catalog.plans.find(p => p.id === btn.dataset.editPlan)));
+  } catch (error) {
+    $('category-list').innerHTML = notice(error.message);
+    $('plan-list').innerHTML = '';
+  }
+}
+
+// --------------------------------------------------------------------------------------
+// The customer area: the bound server and its subscribers
+// --------------------------------------------------------------------------------------
 async function loadMyPanel() {
   loading('my-panel-card', 1);
   try {
@@ -211,10 +271,11 @@ function setPage(id) {
   qa('.page,.side-nav button,.bottom-nav button').forEach(el => el.classList.remove('active'));
   $(id).classList.add('active');
   qa(`[data-page="${id}"]`).forEach(el => el.classList.add('active'));
-  const titles = { dashboard: 'داشبورد', mypanel: 'پنل من', store: 'سفارش پنل', orders: 'سفارش‌های پنل', network: state.caps?.is_system_admin ? 'مدیریت نمایندگان' : 'شبکه فروش', servers: 'سرورها و نودها', finance: 'امور مالی', account: 'حساب و پشتیبانی' };
+  const titles = { dashboard: 'داشبورد', mypanel: 'پنل من', store: 'سفارش پنل', orders: 'سفارش‌های پنل', network: state.caps?.is_system_admin ? 'مدیریت نمایندگان' : 'شبکه فروش', servers: 'سرورها و نودها', catalog: 'کاتالوگ پلن', finance: 'امور مالی', account: 'حساب و پشتیبانی' };
   $('page-title').textContent = titles[id];
   if (id === 'network') loadResellers();
   if (id === 'servers') loadServers();
+  if (id === 'catalog') loadCatalog();
   if (id === 'finance') loadFinance();
   if (id === 'account') renderProfile();
   if (id === 'store') loadStore();
@@ -260,8 +321,9 @@ async function boot() {
 }
 
 function demo() {
-  const granted = ['view_dashboard', 'view_finance', 'view_audit', 'export_reports', 'create_support_ticket', 'answer_support', 'request_funding', 'decide_funding', 'request_adjustment', 'decide_adjustment', 'manage_servers', 'node_control', 'subscriber_control', 'admin_limit', 'change_billing_coefficient', 'manage_resellers', 'order_panel', 'decide_orders'];
+  const granted = ['view_dashboard', 'view_finance', 'view_audit', 'export_reports', 'create_support_ticket', 'answer_support', 'request_funding', 'decide_funding', 'request_adjustment', 'decide_adjustment', 'manage_servers', 'node_control', 'subscriber_control', 'admin_limit', 'change_billing_coefficient', 'manage_resellers', 'order_panel', 'decide_orders', 'manage_catalog'];
   state.caps = { is_system_admin: true, area: 'staff', role: 'system_admin', permissions: Object.fromEntries(granted.map(name => [name, true])) };
+  state.ownedPanels = [{ id: 'demo', name: 'سرور اصلی پاسارگارد', status: 'active', saleable: true }];
   state.dashboard = { organization: { name: 'نمایندگی مرکزی' }, actor: { name: 'مدیر سیستم', role: 'system_admin' }, wallet: { available_irr: 185000000, balance_irr: 135000000, credit_limit_irr: 50000000 }, usage: { lifetime_bytes: 3092376453120 }, children_count: 12 };
   applyCapabilities();
   renderDashboard();
@@ -480,9 +542,11 @@ function saleableOptions() {
   return `<label>سرور<select name="panel_id" required>${state.saleable.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></label>`;
 }
 
-function openModal(type, order) {
+function openModal(type, arg) {
   state.mode = type;
-  state.contextOrder = order || null;
+  state.contextOrder = type === 'quote' || type === 'rejectOrder' || type === 'attach' ? arg || null : null;
+  state.contextPlan = type === 'plan' || type === 'planOrder' ? arg || null : null;
+  state.contextCategory = type === 'category' ? arg || null : null;
   $('modal').classList.remove('hidden');
   $('modal-error').textContent = '';
   let title = '', kicker = '', fields = '';
@@ -515,6 +579,40 @@ function openModal(type, order) {
   } else if (type === 'rejectOrder') {
     title = 'رد سفارش'; kicker = 'سفارش‌های پنل';
     fields = `<p class="quote-box">${esc(state.contextOrder?.business_name || '')}</p><label>دلیل رد (برای مشتری نمایش داده می‌شود)<textarea name="reason" maxlength="500" rows="3" required placeholder="مثلاً ظرفیت سرور با مصرف اعلام‌شده نمی‌خواند"></textarea></label>`;
+  } else if (type === 'attach') {
+    const o = state.contextOrder;
+    title = `تأیید و ساخت حساب ${esc(o?.business_name || '')}`; kicker = 'سفارش‌های پنل';
+    fields = `<p class="quote-box">پس از تأیید، کیف پول مشتری <b>${money(o?.amount_irr)}</b> شارژ می‌شود و سازمان زیرمجموعه ساخته می‌گردد.</p>`
+      + `<label>Admin ID روی سرور مادر (اختیاری)<input name="pg_admin_id" type="number" min="1" value="${esc(o?.pg_admin_id || '')}" placeholder="مثلاً 7"><small>اگر در PasarGuard ادمین این مشتری را ساخته‌اید، شناسهٔ عددی‌اش را بدهید تا صورتحساب و مشترکان به همین حساب متصل شود. بدون آن، اتصال پنل بعداً انجام می‌شود.</small></label>`
+      + '<label>نام Admin (اختیاری)<input name="admin_username" maxlength="80"></label>';
+  } else if (type === 'category') {
+    const c = state.contextCategory;
+    title = c ? 'ویرایش دسته' : 'دستهٔ جدید'; kicker = 'کاتالوگ پلن';
+    fields = `<label>نام دسته<input name="name" required minlength="2" maxlength="80" value="${esc(c?.name || '')}" placeholder="مثلاً پلن‌های ماهانه"></label>`
+      + `<label>توضیح (اختیاری)<textarea name="description" maxlength="500" rows="3">${esc(c?.description || '')}</textarea></label>`;
+  } else if (type === 'plan') {
+    const p = state.contextPlan;
+    title = p ? 'ویرایش پلن' : 'پلن جدید'; kicker = 'کاتالوگ پلن';
+    const panels = state.ownedPanels.filter(x => x.status === 'active');
+    fields = !panels.length
+      ? '<p class="error">برای ساخت پلن به سروری نیاز دارید که خودتان ثبت کرده و به آن متصل شده باشید.</p>'
+      : `<label>سرور<select name="panel_id" required>${panels.map(x => `<option value="${esc(x.id)}" ${x.id === (p?.panel_id || '') ? 'selected' : ''}>${esc(x.name)}${x.saleable ? '' : ' — خارج از فروش'}</option>`).join('')}</select></label>`
+        + `<label>دسته (اختیاری)<select name="category_id"><option value="">بدون دسته</option>${state.catalog.categories.filter(c => c.status === 'active').map(c => `<option value="${esc(c.id)}" ${c.id === (p?.category_id || '') ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>`
+        + `<label>نام پلن<input name="name" required minlength="2" maxlength="120" value="${esc(p?.name || '')}" placeholder="مثلاً ۳۰ روز اقتصادی"></label>`
+        + `<label>توضیح برای مشتری<textarea name="description" maxlength="1000" rows="2">${esc(p?.description || '')}</textarea></label>`
+        + `<div class="field-grid"><label>قیمت هر گیگابایت (ریال)<input name="price_per_gib_irr" type="number" min="1" required value="${num0(p?.price_per_gib_irr)}" placeholder="25000"></label>`
+        + `<label>مصرف روزانه هر کاربر (گیگ)<input name="daily_gib" type="number" min="1" required value="${num0(p?.daily_gib)}" placeholder="10"></label>`
+        + `<label>مدت پلن (روز)<input name="duration_days" type="number" min="1" max="3650" required value="${num0(p?.duration_days)}" placeholder="30"></label>`
+        + `<label>تعداد کاربر<input name="user_count" type="number" min="1" required value="${num0(p?.user_count)}" placeholder="5"></label></div>`
+        + `<p class="quote-box" id="plan-total">مبلغ کل پلن محاسبه می‌شود و در لحظهٔ سفارش از خود پلن خوانده می‌شود؛ مشتری نمی‌تواند آن را تغییر دهد.</p>`
+        + `<label>اعتبار اولیهٔ کیف پول (ریال)<input name="credit_limit_irr" type="number" min="0" value="${p?.credit_limit_irr ?? 0}"><small>عدد ۰ یعنی پس از پرداخت، همان مبلغ کل پلن به‌عنوان اعتبار ثبت می‌شود.</small></label>`
+        + `<label>راهنمای پرداخت<textarea name="payment_instructions" maxlength="2000" rows="3" placeholder="شماره کارت، نام گیرنده و توضیح واریز">${esc(p?.payment_instructions || '')}</textarea></label>`;
+  } else if (type === 'planOrder') {
+    const p = state.contextPlan;
+    title = `سفارش پلن ${esc(p?.name || '')}`; kicker = 'بخش مشتری';
+    fields = `<p class="quote-box">${esc(p?.panel_name || '')} · ${num(p?.user_count)} کاربر · ${num(p?.daily_gib)} گیگابایت روزانه · ${num(p?.duration_days)} روز<br>مبلغ کل: <b>${money(p?.amount_irr)}</b></p>`
+      + '<label>نام کسب‌وکار<input name="business_name" required maxlength="160" placeholder="مثلاً فروش شمال"></label>'
+      + '<label>توضیح برای مدیر<textarea name="note" maxlength="500" rows="3" placeholder="هر نیاز ویژه‌ای که باید بدانیم"></textarea></label>';
   } else {
     title = 'ثبت سرور پاسارگارد'; kicker = 'زیرساخت';
     fields = '<label>نام سرور<input name="name" required></label><label>آدرس HTTPS پنل<input name="base_url" type="url" required placeholder="https://panel.example.com"></label><label>API Key<input name="api_key" type="password" minlength="8" required></label><label>نام کاربری مالک (اختیاری)<input name="owner_username"></label><label>رمز مالک (اختیاری)<input name="owner_password" type="password"></label><label>Admin ID برای صورتحساب (اختیاری)<input name="pg_admin_id" type="number" min="1"></label><label>نام Admin (اختیاری)<input name="admin_username"></label>' + (state.caps.is_system_admin ? '<label class="check"><input type="checkbox" id="verify-tls" name="verify_tls" checked> اعتبارسنجی گواهی TLS</label><p id="tls-warning" class="error hidden">با خاموش‌کردن اعتبارسنجی، ارتباط با این سرور در برابر شنود و جعل محافظت نمی‌شود؛ آن را فقط برای گواهی self-signed آزمایشگاهی بردارید.</p>' : '');
@@ -524,6 +622,17 @@ function openModal(type, order) {
   $('modal-fields').innerHTML = fields;
   const tls = $('verify-tls');
   if (tls) tls.onchange = () => $('tls-warning').classList.toggle('hidden', tls.checked);
+  const total = $('plan-total');
+  if (total) {
+    const sum = () => {
+      const f = new FormData($('modal-form'));
+      const amount = (+f.get('price_per_gib_irr') || 0) * (+f.get('daily_gib') || 0) * (+f.get('duration_days') || 0);
+      total.innerHTML = `مبلغ کل این پلن: <b>${money(amount)}</b> — در لحظهٔ سفارش از خود پلن خوانده می‌شود و مشتری نمی‌تواند آن را تغییر دهد.`;
+    };
+    qa('#modal-form input[name="price_per_gib_irr"],#modal-form input[name="daily_gib"],#modal-form input[name="duration_days"]')
+      .forEach(input => input.oninput = sum);
+    sum();
+  }
 }
 
 $('modal-form').onsubmit = async event => {
@@ -548,16 +657,49 @@ $('modal-form').onsubmit = async event => {
       });
     } else if (mode === 'rejectOrder') {
       await api(`/v1/webapp/orders/${state.contextOrder.id}/reject`, { method: 'POST', body: JSON.stringify({ reason: data.reason }) });
+    } else if (mode === 'attach') {
+      await api(`/v1/webapp/orders/${state.contextOrder.id}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ pg_admin_id: data.pg_admin_id ? +data.pg_admin_id : null, admin_username: data.admin_username || '' }),
+      });
+    } else if (mode === 'category') {
+      const shelf = state.contextCategory;
+      await api(shelf ? `/v1/webapp/plan-categories/${shelf.id}` : '/v1/webapp/plan-categories', {
+        method: shelf ? 'PUT' : 'POST', body: JSON.stringify({ name: data.name, description: data.description || '' }),
+      });
+    } else if (mode === 'plan') {
+      if (!data.panel_id) { $('modal-error').textContent = 'سروری برای انتخاب وجود ندارد'; button.disabled = false; return }
+      const plan = state.contextPlan;
+      await api(plan ? `/v1/webapp/plans/${plan.id}` : '/v1/webapp/plans', {
+        method: plan ? 'PUT' : 'POST',
+        body: JSON.stringify({ panel_id: data.panel_id, category_id: data.category_id || null, name: data.name,
+                               description: data.description || '', price_per_gib_irr: +data.price_per_gib_irr,
+                               daily_gib: +data.daily_gib, duration_days: +data.duration_days, user_count: +data.user_count,
+                               credit_limit_irr: +(data.credit_limit_irr || 0), payment_instructions: data.payment_instructions || '' }),
+      });
+    } else if (mode === 'planOrder') {
+      const plan = state.contextPlan;
+      await api('/v1/webapp/orders', {
+        method: 'POST',
+        body: JSON.stringify({ panel_id: plan.panel_id, plan_id: plan.id, user_count: plan.user_count,
+                               daily_gib: plan.daily_gib, business_name: data.business_name, note: data.note || '' }),
+      });
     } else await api('/v1/webapp/panels', { method: 'POST', body: JSON.stringify({ ...data, pg_admin_id: data.pg_admin_id ? +data.pg_admin_id : null, verify_tls: 'verify_tls' in data }) });
     $('modal').classList.add('hidden');
     event.currentTarget.reset();
     state.contextOrder = null;
-    toast({ adjust: 'درخواست اصلاح ثبت و در انتظار تأیید است', order: 'سفارش شما ثبت و برای مدیر ارسال شد', quote: 'قیمت برای مشتری ارسال شد', rejectOrder: 'سفارش رد شد' }[mode] || 'عملیات با موفقیت انجام شد');
+    state.contextPlan = null;
+    state.contextCategory = null;
+    toast({ adjust: 'درخواست اصلاح ثبت و در انتظار تأیید است', order: 'سفارش شما ثبت و برای مدیر ارسال شد',
+            planOrder: 'سفارش پلن ثبت شد؛ قیمت را تأیید کنید تا راهنمای پرداخت را ببینید',
+            quote: 'قیمت برای مشتری ارسال شد', rejectOrder: 'سفارش رد شد',
+            attach: 'حساب ساخته شد و کیف پول شارژ شد', category: 'دسته ذخیره شد', plan: 'پلن ذخیره شد' }[mode] || 'عملیات با موفقیت انجام شد');
     await loadDashboard();
     if (mode === 'reseller') await loadResellers();
     if (mode === 'server') await loadServers();
     if (mode === 'fund' || mode === 'adjust') await loadFinance();
-    if (['order', 'quote', 'rejectOrder'].includes(mode)) await loadStore();
+    if (['order', 'quote', 'rejectOrder', 'planOrder'].includes(mode)) await loadStore();
+    if (['category', 'plan'].includes(mode)) await loadCatalog();
     if (mode === 'order' && state.caps.area === 'customer') setPage('store');
     if (perm('decide_orders')) { await loadQueue(); await loadOrderBadge() }
   } catch (error) {
@@ -593,6 +735,7 @@ $('refresh').onclick = async () => {
     if (active === 'servers') await loadServers();
     if (active === 'finance') await loadFinance();
     if (active === 'store') await loadStore();
+    if (active === 'catalog') await loadCatalog();
     if (active === 'orders') await loadQueue();
     if (active === 'mypanel') await loadMyPanel();
     toast('اطلاعات به‌روز شد');

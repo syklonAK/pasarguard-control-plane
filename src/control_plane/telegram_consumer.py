@@ -17,14 +17,15 @@ from sqlalchemy import func, select, text
 
 from .app import (
     Account, Actor, ApprovalRequest, Binding, Checkpoint, Closure, Contract, Entry, FundingRequest,
-    Membership, Organization, Panel, PanelOrder, PanelOwner, SessionLocal, Transaction, account, audit,
+    Membership, Organization, Panel, PanelOrder, PanelOwner, Plan, PlanCategory, SessionLocal, Transaction, account, audit,
     effective_role, now, transfer,
 )
 from .rbac import can, denial_fa, role_fa
 from .web_api import (
-    OrderQuoteIn, _unwrap, advance_customer_order, approve_panel_order, create_panel_order, locked_order,
-    order_row, panel_operation, panel_saleable_rows, quote_panel_order, reject_panel_order, requester_actor,
-    review_panels,
+    OrderApproveIn, OrderQuoteIn, PlanCategoryIn, PlanIn, _unwrap, advance_customer_order, approve_panel_order,
+    create_panel_order, create_catalog_plan, create_plan_category, locked_order, order_row, panel_operation,
+    panel_saleable_rows, plan_row, quote_panel_order, reject_panel_order, requester_actor, review_panels,
+    saleable_plan_rows, set_catalog_status,
 )
 
 STREAM = "telegram_updates"
@@ -40,6 +41,7 @@ SECTIONS = (
     ("dashboard", "📊 داشبورد", "view_dashboard", STAFF),
     ("orders", "🧾 سفارش‌های پنل", "decide_orders", STAFF),
     ("servers", "🖥 سرورها", "manage_servers", STAFF),
+    ("catalog", "🛍 کاتالوگ پلن", "manage_catalog", STAFF),
     ("resellers", "👥 نمایندگان", "manage_resellers", STAFF),
     ("finance", "💰 مرکز مالی", "view_finance", STAFF),
     ("approvals", "✅ تأیید اصلاحات", "decide_adjustment", STAFF),
@@ -57,7 +59,8 @@ SECTIONS = (
     ("my_webapp", "🌐 پنل کاربری", "view_dashboard", CUSTOMER),
     ("support", "🛟 پشتیبانی", "create_support_ticket", BOTH),
 )
-TOP = {STAFF: ("dashboard", "orders", "servers", "resellers", "finance", "approvals", "system", "support", "webapp"),
+TOP = {STAFF: ("dashboard", "orders", "servers", "catalog", "resellers", "finance", "approvals", "system", "support",
+               "webapp"),
        CUSTOMER: ("new_order", "my_orders", "my_panel", "usage", "topup", "support", "my_webapp")}
 LABELS = {name: label for name, label, _permission, _audience in SECTIONS}
 SECTION_PERMISSION = {name: permission for name, _label, permission, _audience in SECTIONS}
@@ -215,6 +218,125 @@ def set_saleable(chat_id, panel_id, saleable):
               organization_id=ctx["organization_id"], metadata={"saleable": panel.saleable})
         session.commit()
         return "این سرور برای سفارش مشتریان باز شد." if panel.saleable else "سرور از لیست فروش خارج شد."
+
+
+def catalog_ctx(chat_id):
+    """Catalog writes are the seller's decision, so the bot checks the same permission as the API."""
+    ctx = require_context(chat_id)
+    if not can(ctx["role"], "manage_catalog"): raise PermissionError(denial_fa("manage_catalog"))
+    return ctx
+
+
+def catalog_list(chat_id):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        shelves = session.scalars(select(PlanCategory).where(PlanCategory.organization_id == ctx["organization_id"])
+                                  .order_by(PlanCategory.name)).all()
+        plans = session.scalars(select(Plan).where(Plan.organization_id == ctx["organization_id"])
+                                .order_by(Plan.price_per_gib_irr)).all()
+        panels = {row.id: row.name for row in session.scalars(select(Panel).join(PanelOwner, PanelOwner.panel_id == Panel.id)
+                                                             .where(PanelOwner.organization_id == ctx["organization_id"])).all()}
+        shelves = [(c.id, c.name, c.status) for c in list(shelves)]
+        plans = [plan_row(p, panels.get(p.panel_id)) for p in list(plans)]
+    lines = ["<b>کاتالوگ پلن</b>",
+             "<i>پلنِ باز روی سرورِ «آماده فروش» به مشتری در «➕ سفارش پنل» نشان داده می‌شود؛ قیمت از خود پلن خوانده "
+             "می‌شود، نه از گفت‌وگو.</i>"]
+    keyboard = []
+    for shelf_id, name, status in shelves:
+        lines.append(f"{'🟢' if status == 'active' else '⚪️'} <b>🗄 {html.escape(name)}</b> — "
+                     f"{'باز' if status == 'active' else 'بسته'}")
+        keyboard.append([{"text": "🔻 بستن دسته" if status == "active" else "🔓 باز کردن دسته",
+                          "callback_data": f"ctog|{shelf_id}"}])
+    for row in plans:
+        lines.append(f"{'🟢' if row['status'] == 'active' else '⚪️'} <b>{html.escape(row['name'])}</b> روی "
+                     f"{html.escape(row['panel_name'] or '—')} — {users(row['user_count'])} · {gib(row['daily_gib'])} · "
+                     f"{row['duration_days']} روز{NL}قیمت هر گیگ {money(row['price_per_gib_irr'])} · "
+                     f"مبلغ کل <b>{money(row['amount_irr'])}</b>")
+        keyboard.append([{"text": ("🔻 بستن " if row["status"] == "active" else "🔓 باز کردن ") + row["name"][:16],
+                          "callback_data": f"ptog|{row['id']}"}])
+    if not plans: lines.append("هنوز پلنی نساخته‌اید.")
+    keyboard.append([{"text": "➕ دسته جدید", "callback_data": "catnew"}, {"text": "➕ پلن جدید", "callback_data": "plnew"}])
+    keyboard.append([{"text": "🔙 منو", "callback_data": "section|menu"}])
+    return NL.join(lines), {"inline_keyboard": keyboard}
+
+
+def toggle_catalog(chat_id, kind, target_id):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        row = session.get(PlanCategory if kind == "category" else Plan, target_id)
+        if not row: raise PermissionError("مورد موردنظر در کاتالوگ شما نیست.")
+        opening = row.status != "active"
+        try:
+            set_catalog_status(session, organization_id=ctx["organization_id"], actor_id=ctx["actor_id"], kind=kind,
+                               target_id=target_id, status="active" if opening else "inactive")
+            session.commit()
+        except HTTPException as exc:
+            raise PermissionError(str(exc.detail)) from exc
+    if kind == "category":
+        return "دسته باز شد؛ پلن‌های آن دوباره قابل خریدند." if opening else \
+               "دسته بسته شد؛ هیچ‌کدام از پلن‌های آن به مشتری نشان داده نمی‌شود."
+    return "پلن برای فروش باز شد." if opening else "پلن بسته شد؛ سفارش‌های پیشین دست‌نخورده می‌مانند."
+
+
+def create_shelf(chat_id, data):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        try:
+            category = create_plan_category(session, organization_id=ctx["organization_id"], actor_id=ctx["actor_id"],
+                                            x=PlanCategoryIn(name=data["name"], description=data.get("description", "")))
+            session.commit()
+        except HTTPException as exc:
+            raise PermissionError(str(exc.detail)) from exc
+        return category.name
+
+
+def pick_plan(plan_id):
+    """A plan the customer may buy right now, or nothing; the price is never taken from chat."""
+    with SessionLocal() as session:
+        for row in saleable_plan_rows(session):
+            if row["id"] == plan_id: return row
+    return None
+
+
+def save_plan(chat_id, data):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        try:
+            plan = create_catalog_plan(session, organization_id=ctx["organization_id"], actor_id=ctx["actor_id"],
+                                       x=PlanIn(panel_id=data["panel_id"], category_id=data.get("category_id"),
+                                                name=data["name"], description=data.get("description", ""),
+                                                price_per_gib_irr=data["price_per_gib_irr"], daily_gib=data["daily_gib"],
+                                                duration_days=data["duration_days"], user_count=data["user_count"],
+                                                credit_limit_irr=data["credit_limit_irr"],
+                                                payment_instructions=data["instructions"]))
+            session.commit()
+        except HTTPException as exc:
+            raise PermissionError(str(exc.detail)) from exc
+        return plan_row(plan, session.get(Panel, plan.panel_id).name)
+
+
+def catalog_panels(chat_id):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        rows = session.execute(text("SELECT p.id,p.name,p.saleable FROM panels p "
+                                    "JOIN panel_owners po ON po.panel_id=p.id WHERE po.organization_id=:org "
+                                    "AND p.status='active' ORDER BY p.name"), {"org": ctx["organization_id"]}).mappings().all()
+    if not rows: raise PermissionError("اول روی وب‌اپ یک سرور ثبت کنید؛ پلن فقط روی سرور خودتان می‌نشیند.")
+    keyboard = [[{"text": f"🖥 {row['name'][:26]}" + ("" if row["saleable"] else " (خارج از فروش)"),
+                  "callback_data": f"plsel|{row['id']}"}] for row in rows[:15]]
+    keyboard.append([{"text": "🔙 کاتالوگ", "callback_data": "section|catalog"}])
+    return ("<b>سروری که این پلن روی آن فروش می‌رود را انتخاب کنید</b>", {"inline_keyboard": keyboard})
+
+
+def catalog_shelves(chat_id):
+    ctx = catalog_ctx(chat_id)
+    with SessionLocal() as session:
+        rows = session.scalars(select(PlanCategory).where(PlanCategory.organization_id == ctx["organization_id"])
+                               .order_by(PlanCategory.name)).all()
+        shelves = [(c.id, c.name) for c in rows]
+    keyboard = [[{"text": f"🗄 {name[:28]}", "callback_data": f"plsh|{shelf_id}"}] for shelf_id, name in shelves[:15]]
+    keyboard.append([{"text": "🚫 بدون دسته", "callback_data": "plsh|"}])
+    return ("<b>این پلن در کدام دسته نمایش داده شود؟</b>", {"inline_keyboard": keyboard})
 
 
 def bot_panel(chat_id, panel_id):
@@ -458,16 +580,31 @@ def customer_order_rows(chat_id, limit=8):
 
 
 def order_panels(chat_id):
-    """Servers the customer may order from; the owning admin decides which ones are on sale."""
+    """Published plans first; a bare server is the fallback where the admin quotes by hand."""
     with SessionLocal() as session:
-        rows = panel_saleable_rows(session)
-    if not rows:
+        panels = panel_saleable_rows(session)
+        plans = saleable_plan_rows(session)
+    if not panels and not plans:
         return "هنوز سروری برای فروش باز نشده است. به مدیر مجموعه بگویید سروری را «آماده فروش» کند.", back_button()
-    keyboard = [[{"text": f"🛒 {row['name'][:26]}", "callback_data": f"onew|{row['id']}"}] for row in rows[:15]]
+    lines = ["<b>چه چیزی می‌خواهید بخرید؟</b>",
+             "پلن آماده قیمت مشخصی دارد و همان لحظه ثبت می‌شود؛ اگر سروری را انتخاب کنید، مدیر مجموعه قیمت را "
+             "دستی تعیین می‌کند."]
+    keyboard = []
+    if plans:
+        lines.append("")
+        lines.append("<b>🏷 پلن‌های آماده</b>")
+        for row in plans[:12]:
+            lines.append(f"• <b>{html.escape(row['name'])}</b> روی {html.escape(row['panel_name'] or '—')} — "
+                         f"{users(row['user_count'])} · {gib(row['daily_gib'])} · {row['duration_days']} روز — "
+                         f"<b>{money(row['amount_irr'])}</b>")
+            keyboard.append([{"text": f"🏷 {row['name'][:20]} · {row['amount_irr']:,}",
+                             "callback_data": f"oplan|{row['id']}"}])
+    lines.append("")
+    lines.append("<b>🖥 سرور با قیمت توافقی</b>" if plans else "<b>🖥 سرورها</b>")
+    for row in panels[:12]:
+        keyboard.append([{"text": f"🛒 {row['name'][:26]}", "callback_data": f"onew|{row['id']}"}])
     keyboard.append([{"text": "🧾 سفارش‌های من", "callback_data": "section|my_orders"},
                      {"text": "🔙 منو", "callback_data": "section|menu"}])
-    lines = ["<b>برای سفارش پنل، سرور خود را انتخاب کنید</b>",
-             "پس از انتخاب، نام کسب‌وکار، تعداد کاربر و مصرف روزانه را می‌پرسیم؛ مدیر مجموعه قیمت را تعیین می‌کند."]
     return NL.join(lines), {"inline_keyboard": keyboard}
 
 
@@ -476,6 +613,9 @@ def order_text(order, telegram_id=None):
              f"سرور: <b>{html.escape(order['panel_name'] or '—')}</b>",
              f"وضعیت: <b>{STATUS_FA.get(order['status'], order['status'])}</b>",
              f"{users(order['user_count'])} · {gib(order['daily_gib'])}"]
+    if order["plan_name"]:
+        lines.append(f"پلن: <b>{html.escape(order['plan_name'])}</b>"
+                     + (f" · {order['duration_days']} روز" if order["duration_days"] else ""))
     if order["note"]: lines.append(f"توضیح: <i>{html.escape(order['note'][:200])}</i>")
     if order["amount_irr"]:
         lines += ["", f"مبلغ: <b>{money(order['amount_irr'])}</b>", f"سقف اعتبار: <b>{money(order['credit_limit_irr'])}</b>",
@@ -501,13 +641,13 @@ def order_buttons(order, owner, reviewer):
     return {"inline_keyboard": rows}
 
 
-def place_order(chat_id, panel_id, business_name, user_count, daily_gib, note):
+def place_order(chat_id, panel_id, business_name, user_count, daily_gib, note, plan_id=None):
     """A chat with no membership at all can reach here; that is the whole point of the funnel."""
     with SessionLocal() as session:
         try:
             order = create_panel_order(session, telegram_id=chat_id, display_name=business_name, via="telegram",
                                        panel_id=panel_id, business_name=business_name, user_count=user_count,
-                                       daily_gib=daily_gib, note=note)
+                                       daily_gib=daily_gib, note=note, plan_id=plan_id)
             session.commit()
         except HTTPException as exc:
             raise PermissionError(str(exc.detail)) from exc
@@ -576,7 +716,7 @@ def customer_order_action(chat_id, order_id, action):
         return reply, order_row(session, order), seller_org
 
 
-def reviewer_order_action(chat_id, order_id, action, reason=""):
+def reviewer_order_action(chat_id, order_id, action, reason="", attach=None):
     """Approve or reject a declared payment; approval is the only place the funnel creates money."""
     ctx = require_context(chat_id)
     if not can(ctx["role"], "decide_orders"): raise PermissionError(denial_fa("decide_orders"))
@@ -584,7 +724,7 @@ def reviewer_order_action(chat_id, order_id, action, reason=""):
         try:
             order = locked_order(session, order_id, "approved" if action == "ok" else "rejected")
             if action == "ok":
-                result = approve_panel_order(session, order, ctx["actor_id"], ctx["organization_id"])
+                result = approve_panel_order(session, order, ctx["actor_id"], ctx["organization_id"], attach)
             else:
                 reject_panel_order(session, order, ctx["actor_id"], ctx["organization_id"], reason)
                 result = {"id": order.id, "status": order.status}
@@ -592,6 +732,13 @@ def reviewer_order_action(chat_id, order_id, action, reason=""):
             raise PermissionError(str(exc.detail)) from exc
         session.commit()
         return result
+
+
+def order_needs_admin(order_id):
+    """A plan order never passes through the quoting questions, so the admin id is asked at approval."""
+    with SessionLocal() as session:
+        order = session.get(PanelOrder, order_id)
+        return bool(order and not order.pg_admin_id and order.status == "payment_declared")
 
 
 def apply_quote(chat_id, data):
@@ -679,9 +826,117 @@ async def begin_order(redis, chat_id, panel_id):
     await send(chat_id, "نام کسب‌وکار خود را ارسال کنید. برای لغو /cancel را بفرستید.")
 
 
+async def begin_plan_order(redis, chat_id, plan_id):
+    row = await asyncio.to_thread(pick_plan, plan_id)
+    if not row:
+        await send(chat_id, "این پلن دیگر فروش نمی‌رود؛ از لیست تازه انتخاب کنید.", back_button("🔙 سفارش پنل", "new_order"))
+        return
+    await set_state(redis, chat_id, {"flow": "order", "step": "business_name",
+                                     "data": {"panel_id": row["panel_id"], "plan_id": row["id"],
+                                              "user_count": row["user_count"], "daily_gib": row["daily_gib"]}})
+    await send(chat_id, f"پلن <b>{html.escape(row['name'])}</b> — {money(row['amount_irr'])} انتخاب شد."
+                        f"{NL}نام کسب‌وکار خود را ارسال کنید. برای لغو /cancel را بفرستید.")
+
+
 async def begin_quote(redis, chat_id, order_id):
     await set_state(redis, chat_id, {"flow": "quote", "step": "amount", "data": {"order_id": order_id}})
     await send(chat_id, "مبلغ کل این سفارش را به ریال ارسال کنید. برای لغو /cancel را بفرستید.")
+
+
+async def begin_shelf(redis, chat_id):
+    await set_state(redis, chat_id, {"flow": "category", "step": "name", "data": {}})
+    await send(chat_id, "نام دسته جدید را ارسال کنید؛ مثال: پلن‌های ماهانه. برای لغو /cancel را بفرستید.")
+
+
+async def begin_plan(redis, chat_id):
+    message, markup = await asyncio.to_thread(catalog_panels, chat_id)
+    await set_state(redis, chat_id, {"flow": "plan", "step": "panel", "data": {}})
+    await send(chat_id, message + f"{NL}برای لغو /cancel را بفرستید.", markup)
+
+
+# One question at a time, and the answer is stored under the field name the API expects, so the bot
+# builds a PlanIn rather than a parallel vocabulary.
+PLAN_QUESTIONS = (("name", "نام پلن را ارسال کنید؛ مثال: ۳۰ روز اقتصادی"),
+                  ("price_per_gib_irr", "قیمت هر گیگابایت را به ریال ارسال کنید؛ مثال: 25000"),
+                  ("daily_gib", "این پلن روزانه چند گیگابایت به هر کاربر می‌دهد؟"),
+                  ("duration_days", "مدت پلن چند روز است؟ مثال: 30"),
+                  ("user_count", "این پلن برای چند کاربر است؟ مثال: 5"),
+                  ("credit_limit_irr", "اعتبار اولیه کیف پول پس از تأیید پرداخت چقدر باشد؟ "
+                                       "برای همان مبلغ پلن «خودکار» و برای بدون اعتبار عدد 0 را بفرستید."),
+                  ("instructions", "شماره کارت یا راهنمای پرداخت را ارسال کنید؛ مشتری همین متن را می‌بیند."))
+PLAN_LIMITS = {"price_per_gib_irr": 10_000_000_000_000, "daily_gib": 100_000, "duration_days": 3650,
+               "user_count": 100_000}
+
+
+def plan_prompt(step):
+    for name, text in PLAN_QUESTIONS:
+        if name == step: return text
+    return None
+
+
+async def continue_category(redis, chat_id, value, state):
+    data = state["data"]
+    if state["step"] == "name":
+        if not 2 <= len(value) <= 80: await send(chat_id, "نام دسته باید ۲ تا ۸۰ حرف باشد."); return
+        data["name"] = value; state["step"] = "description"
+        await set_state(redis, chat_id, state)
+        await send(chat_id, "توضیح کوتاهی برای این دسته بنویسید یا «بعد» را بفرستید.")
+        return
+    data["description"] = "" if value in ("بعد", "-", "0") else value[:500]
+    try:
+        name = await asyncio.to_thread(create_shelf, chat_id, data)
+    except PermissionError as exc:
+        await abort_flow(redis, chat_id, str(exc)); return
+    await clear_state(redis, chat_id)
+    message, markup = await asyncio.to_thread(catalog_list, chat_id)
+    await send(chat_id, f"دسته <b>{html.escape(name)}</b> ساخته شد.{NL}{NL}{message}", markup)
+
+
+async def continue_plan(redis, chat_id, value, state):
+    data = state["data"]; step = state["step"]
+    if step in ("panel", "shelf"):
+        await send(chat_id, "با دکمه‌های بالای صفحه انتخاب کنید. برای لغو /cancel را بفرستید."); return
+    field = step
+    if field == "name":
+        if not 2 <= len(value) <= 120: await send(chat_id, "نام پلن باید ۲ تا ۱۲۰ حرف باشد."); return
+        data["name"] = value
+    elif field == "instructions":
+        if len(value) < 3: await send(chat_id, "راهنمای پرداخت را کامل‌تر بنویسید."); return
+        data["instructions"] = value[:2000]
+    elif field == "credit_limit_irr":
+        digits = "0" if value.strip() == "خودکار" else number(value)
+        if not digits.isdigit(): await send(chat_id, "مبلغ را به عدد و به ریال ارسال کنید."); return
+        data["credit_limit_irr"] = int(digits)
+    else:
+        digits = number(value)
+        if not digits.isdigit() or not 0 < int(digits) <= PLAN_LIMITS[field]:
+            await send(chat_id, f"عددی بین ۱ تا {PLAN_LIMITS[field]:,} ارسال کنید."); return
+        data[field] = int(digits)
+    steps = [name for name, _ in PLAN_QUESTIONS]
+    nxt = steps[steps.index(field) + 1] if field != steps[-1] else None
+    if not nxt:
+        try:
+            plan = await asyncio.to_thread(save_plan, chat_id, data)
+        except PermissionError as exc:
+            await abort_flow(redis, chat_id, str(exc)); return
+        await clear_state(redis, chat_id)
+        message, markup = await asyncio.to_thread(catalog_list, chat_id)
+        await send(chat_id, f"پلن <b>{html.escape(plan['name'])}</b> ساخته شد و از این پس مشتری می‌تواند آن را بخرد."
+                            f"{NL}مبلغ کل: <b>{money(plan['amount_irr'])}</b>{NL}{NL}{message}", markup)
+        await send(chat_id, "برای مشتری، منوی «➕ سفارش پنل» را تازه کنید.", menu_for(await current_role(chat_id)))
+        return
+    state["step"] = nxt
+    await set_state(redis, chat_id, state)
+    await send(chat_id, plan_prompt(nxt))
+
+
+async def continue_attach(redis, chat_id, value, state):
+    """The last question of a review: which admin on the mother server belongs to this customer."""
+    skip = value.strip() in ("بعد", "-", "0")
+    digits = number(value)
+    if not skip and not digits.isdigit(): await send(chat_id, "شناسه Admin باید عددی باشد."); return
+    attach = None if skip else OrderApproveIn(pg_admin_id=int(digits))
+    await apply_approval(redis, chat_id, state["data"]["order_id"], "ok", attach=attach)
 
 
 def number(value):
@@ -699,9 +954,12 @@ async def continue_order(redis, chat_id, value, state):
     data = state["data"]; step = state["step"]
     if step == "business_name":
         if len(value) < 2: await send(chat_id, "نام باید حداقل دو حرف باشد."); return
-        data["business_name"] = value[:160]; state["step"] = "user_count"
+        data["business_name"] = value[:160]
+        # A plan already fixes the size and the price, so only the note is left to ask for.
+        state["step"] = "note" if data.get("plan_id") else "user_count"
         await set_state(redis, chat_id, state)
-        await send(chat_id, "تعداد کاربر (یوزر) موردنیاز را عددی ارسال کنید؛ مثال: 50")
+        await send(chat_id, "توضیح اختیاری برای مدیر بنویسید یا «بعد» را بفرستید." if state["step"] == "note"
+                   else "تعداد کاربر (یوزر) موردنیاز را عددی ارسال کنید؛ مثال: 50")
     elif step == "user_count":
         digits = number(value)
         if not digits.isdigit() or not 0 < int(digits) <= 100000:
@@ -720,17 +978,25 @@ async def continue_order(redis, chat_id, value, state):
         data["note"] = "" if value in ("بعد", "-", "0") else value[:500]
         try:
             order = await asyncio.to_thread(place_order, chat_id, data["panel_id"], data["business_name"],
-                                            data["user_count"], data["daily_gib"], data["note"])
+                                            data["user_count"], data["daily_gib"], data["note"], data.get("plan_id"))
         except PermissionError as exc:
             await abort_flow(redis, chat_id, str(exc)); return
         await clear_state(redis, chat_id)
         await send(chat_id, "سفارش شما ثبت شد و برای بررسی به مدیر مجموعه ارسال شد.{NL}{NL}".format(NL=NL) + order_text(order))
+        quoted = order["status"] == "quoted"
         for chat in await asyncio.to_thread(order_reviewer_chats, order["panel_id"]):
             if chat != chat_id:
                 await send(chat, f"🧾 سفارش جدید: <b>{html.escape(order['business_name'])}</b> — "
-                                 f"{users(order['user_count'])}، {gib(order['daily_gib'])}",
-                           {"inline_keyboard": [[{"text": "💵 قیمت‌گذاری", "callback_data": f"o|{order['id']}|quote"},
-                                                 {"text": "📋 جزئیات", "callback_data": f"o|{order['id']}|view"}]]})
+                                 f"{users(order['user_count'])}، {gib(order['daily_gib'])}"
+                                 f"{' · پلن ' + html.escape(order['plan_name'] or '') if quoted else ''}",
+                           {"inline_keyboard": [[{"text": "💵 قیمت‌گذاری", "callback_data": f"o|{order['id']}|quote"}]
+                                                if not quoted else
+                                                [{"text": "✅ تأیید قیمت مشتری", "callback_data": f"o|{order['id']}|view"}],
+                                               [{"text": "📋 جزئیات", "callback_data": f"o|{order['id']}|view"}]]})
+        if quoted:
+            await send(chat_id, "قیمت این پلن مشخص است. با «تأیید قیمت» سفارش را قطعی کنید تا راهنمای پرداخت ببینید.",
+                       {"inline_keyboard": [[{"text": "✅ تأیید قیمت", "callback_data": f"o|{order['id']}|confirm"},
+                                             {"text": "🧾 سفارش‌های من", "callback_data": "section|my_orders"}]]})
         await send(chat_id, "برای پیگیری وضعیت، «🧾 سفارش‌های من» را بزنید.", menu_for(CUSTOMER))
 
 
@@ -790,6 +1056,9 @@ async def continue_state(redis, chat_id, value, state):
         await send(chat_id, "عملیات لغو شد.", menu_for(await current_role(chat_id))); return
     if state["flow"] == "order": await continue_order(redis, chat_id, value, state); return
     if state["flow"] == "quote": await continue_quote(redis, chat_id, value, state); return
+    if state["flow"] == "category": await continue_category(redis, chat_id, value, state); return
+    if state["flow"] == "plan": await continue_plan(redis, chat_id, value, state); return
+    if state["flow"] == "attach": await continue_attach(redis, chat_id, value, state); return
     if state["flow"] == "credit":
         amount = number(value)
         if not amount.isdigit() or int(amount) <= 0: await send(chat_id, "مبلغ معتبر به ریال ارسال کنید."); return
@@ -853,6 +1122,8 @@ async def open_section(chat_id, section, redis):
         message, markup = await asyncio.to_thread(server_list, chat_id); await send(chat_id, message, markup)
     elif section == "orders":
         message, markup = await asyncio.to_thread(order_queue, chat_id); await send(chat_id, message, markup)
+    elif section == "catalog":
+        message, markup = await asyncio.to_thread(catalog_list, chat_id); await send(chat_id, message, markup)
     elif section == "resellers":
         message, markup = await asyncio.to_thread(reseller_list, chat_id); await send(chat_id, message, markup)
     elif section == "finance":
@@ -969,6 +1240,32 @@ async def handle_callback(redis, chat_id, callback_id, data):
             message = await asyncio.to_thread(set_saleable, chat_id, parts[1], parts[2] == "1")
             await answer_callback(callback_id, message)
             text, markup = await asyncio.to_thread(server_list, chat_id); await send(chat_id, text, markup)
+        elif parts[0] in ("ctog", "ptog") and len(parts) == 2:
+            kind = "category" if parts[0] == "ctog" else "plan"
+            message = await asyncio.to_thread(toggle_catalog, chat_id, kind, parts[1])
+            await answer_callback(callback_id, message)
+            text, markup = await asyncio.to_thread(catalog_list, chat_id); await send(chat_id, text, markup)
+        elif data == "catnew":
+            await answer_callback(callback_id, "در حال ساخت دسته…"); await begin_shelf(redis, chat_id)
+        elif data == "plnew":
+            await answer_callback(callback_id, "در حال ساخت پلن…"); await begin_plan(redis, chat_id)
+        elif parts[0] == "plsel" and len(parts) == 2:
+            state = await get_state(redis, chat_id)
+            if not state or state.get("flow") != "plan" or state["step"] != "panel":
+                await answer_callback(callback_id, "برای ساخت پلن «➕ پلن جدید» را بزنید"); return
+            state["data"]["panel_id"] = parts[1]; state["step"] = "shelf"
+            await set_state(redis, chat_id, state); await answer_callback(callback_id)
+            message, markup = await asyncio.to_thread(catalog_shelves, chat_id)
+            await send(chat_id, message, markup)
+        elif parts[0] == "plsh" and len(parts) == 2:
+            state = await get_state(redis, chat_id)
+            if not state or state.get("flow") != "plan" or state["step"] != "shelf":
+                await answer_callback(callback_id, "برای ساخت پلن «➕ پلن جدید» را بزنید"); return
+            state["data"]["category_id"] = parts[1] or None; state["step"] = "name"
+            await set_state(redis, chat_id, state); await answer_callback(callback_id)
+            await send(chat_id, plan_prompt("name") + f"{NL}برای لغو /cancel را بفرستید.")
+        elif parts[0] == "oplan" and len(parts) == 2:
+            await answer_callback(callback_id, "در حال ثبت سفارش…"); await begin_plan_order(redis, chat_id, parts[1])
         elif parts[0] == "onew" and len(parts) == 2:
             await answer_callback(callback_id, "در حال ثبت سفارش…"); await begin_order(redis, chat_id, parts[1])
         elif parts[0] == "q" and len(parts) == 2:
@@ -1003,21 +1300,37 @@ async def order_callback(redis, chat_id, callback_id, order_id, action):
                                {"inline_keyboard": [[{"text": "✅ تأیید و ساخت حساب", "callback_data": f"o|{order_id}|ok"},
                                                      {"text": "📋 جزئیات", "callback_data": f"o|{order_id}|view"}]]})
         return
-    if action in ("ok", "no"):
+    if action == "ok" and await asyncio.to_thread(order_needs_admin, order_id):
+        await answer_callback(callback_id, "شناسه Admin لازم است")
+        await set_state(redis, chat_id, {"flow": "attach", "step": "pg_admin_id", "data": {"order_id": order_id}})
+        await send(chat_id, "شناسه عددی Admin این مشتری در پنل مادر را بفرستید؛ اگر نساخته‌اید «بعد» را بزنید. "
+                            "برای لغو /cancel را بفرستید.")
+        return
+    if action in ("ok", "no"): await apply_approval(redis, chat_id, order_id, action, callback_id)
+
+
+async def apply_approval(redis, chat_id, order_id, action, callback_id=None, attach=None):
+    """Finish a review, then tell both sides; the reviewer may get here from the admin-id question."""
+    try:
         result = await asyncio.to_thread(reviewer_order_action, chat_id, order_id, action,
-                                         "" if action == "ok" else "رد توسط مدیر مجموعه")
-        await answer_callback(callback_id, "تصمیم ثبت شد")
-        await send(chat_id, "✅ حساب مشتری ساخته و کیف پول شارژ شد." if action == "ok" else "❌ سفارش رد شد.",
-                   menu_for(await current_role(chat_id)))
-        customer = await asyncio.to_thread(order_owner_telegram_id, order_id)
-        if not customer: return
-        if action == "ok":
-            await send(customer, "🎉 سفارش شما تأیید شد و حساب شما ساخته شد."
-                                 f"{NL}موجودی اولیه: <b>{money(result.get('balance_irr', 0))}</b>"
-                                 f"{NL}سرور: <b>{html.escape(str(result.get('panel_name') or ''))}</b>"
-                                 f"{NL}با «🌐 پنل کاربری» وارد پنل شوید و کاربر بسازید.", panel_button("باز کردن پنل من"))
-        else:
-            await send(customer, "❌ متأسفانه سفارش شما رد شد. برای دیدن دلیل به بخش 🛟 پشتیبانی پیام بدهید.", menu_for(CUSTOMER))
+                                         "" if action == "ok" else "رد توسط مدیر مجموعه", attach)
+    except PermissionError as exc:
+        await clear_state(redis, chat_id)
+        if callback_id: await answer_callback(callback_id, str(exc)[:190])
+        await send(chat_id, html.escape(str(exc)), menu_for(await current_role(chat_id))); return
+    await clear_state(redis, chat_id)
+    if callback_id: await answer_callback(callback_id, "تصمیم ثبت شد")
+    await send(chat_id, "✅ حساب مشتری ساخته و کیف پول شارژ شد." if action == "ok" else "❌ سفارش رد شد.",
+               menu_for(await current_role(chat_id)))
+    customer = await asyncio.to_thread(order_owner_telegram_id, order_id)
+    if not customer: return
+    if action == "ok":
+        await send(customer, "🎉 سفارش شما تأیید شد و حساب شما ساخته شد."
+                             f"{NL}موجودی اولیه: <b>{money(result.get('balance_irr', 0))}</b>"
+                             f"{NL}سرور: <b>{html.escape(str(result.get('panel_name') or ''))}</b>"
+                             f"{NL}با «🌐 پنل کاربری» وارد پنل شوید و کاربر بسازید.", panel_button("باز کردن پنل من"))
+    else:
+        await send(customer, "❌ متأسفانه سفارش شما رد شد. برای دیدن دلیل به بخش 🛟 پشتیبانی پیام بدهید.", menu_for(CUSTOMER))
 
 
 async def main():

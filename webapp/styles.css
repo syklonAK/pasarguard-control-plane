@@ -21,3 +21,9 @@ sheet label.check input{width:auto;margin:0;padding:0;accent-color:var(--primary
 .card-actions{flex-wrap:wrap}
 .data-card p{line-height:1.9}
 .bottom-nav{grid-template-columns:repeat(auto-fit,minmax(0,1fr))}
+
+/* Plan catalog */
+.head-actions{display:flex;gap:8px;flex-wrap:wrap}
+.plan-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.plan-meta em{padding:4px 9px;border-radius:20px;background:rgba(54,205,232,.1);color:#bfeaf5;font-size:10px;font-style:normal}
+.field-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}

@@ -27,6 +27,9 @@ PRICING = {"change_billing_coefficient"}
 # order plus the subscribers on the server that order eventually binds them to.
 ORDER = {"order_panel"}
 ORDER_DECIDE = {"decide_orders"}
+# A plan is a price the whole organization sells at, so publishing one is its own permission:
+# an operator who may run servers may not decide what a GiB costs a stranger.
+CATALOG = {"manage_catalog"}
 CUSTOMER = {"view_dashboard", "view_finance", "export_reports", "create_support_ticket",
             "request_funding", "subscriber_control"} | ORDER
 
@@ -34,8 +37,8 @@ CUSTOMER = {"view_dashboard", "view_finance", "export_reports", "create_support_
 # requester and the approver must be two different people, and only the system
 # administrator is allowed to approve.
 MATRIX: dict[str, set[str]] = {
-    "system_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | ORDER | ORDER_DECIDE | {"decide_adjustment"},
-    "reseller_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | ORDER | ORDER_DECIDE,
+    "system_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | CATALOG | ORDER | ORDER_DECIDE | {"decide_adjustment"},
+    "reseller_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | CATALOG | ORDER | ORDER_DECIDE,
     "operator": {"view_dashboard", "view_audit", "export_reports", "manage_servers", "node_control", "subscriber_control", "admin_limit"},
     "finance": {"view_dashboard", "view_finance", "view_audit", "export_reports", "create_support_ticket"} | MONEY_REQUEST | MONEY_DECIDE,
     "support": {"view_dashboard", "view_finance", "create_support_ticket", "answer_support", "subscriber_control"},
@@ -43,7 +46,7 @@ MATRIX: dict[str, set[str]] = {
     "customer": CUSTOMER,
 }
 
-ALL_PERMISSIONS = sorted(VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | ORDER | ORDER_DECIDE
+ALL_PERMISSIONS = sorted(VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | CATALOG | ORDER | ORDER_DECIDE
                          | {"decide_adjustment"})
 
 LABELS_FA = {
@@ -65,6 +68,7 @@ LABELS_FA = {
     "manage_resellers": "مدیریت نمایندگان",
     "order_panel": "ثبت و پیگیری سفارش پنل",
     "decide_orders": "بررسی و تأیید سفارش پنل",
+    "manage_catalog": "مدیریت کاتالوگ پلن‌ها",
 }
 
 
