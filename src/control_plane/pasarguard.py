@@ -51,5 +51,6 @@ class Client:
         params={"offset":offset,"limit":limit}
         if admin_id is not None:params["admin_id"]=admin_id
         return self.call("GET",USERS,params=params)
+    def user(self,user_id):return self.call("GET",USER_BY_ID.format(user_id=user_id))
     def set_user_enabled(self,user_id,enabled):return self.call("PUT",(USER_ENABLE if enabled else USER_DISABLE).format(user_id=user_id),owner=True)
     def reset_user_data(self,user_id):return self.call("POST",USER_RESET_DATA.format(user_id=user_id),owner=True)

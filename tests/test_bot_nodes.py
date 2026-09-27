@@ -79,9 +79,11 @@ def args_of(recorded, name):
 def test_node_listing_shows_persian_controls_and_audits_the_read(client, session, bot_panel, fake_panel):
     message, markup = telegram_consumer.node_list(ROOT_ID, bot_panel)
     assert "Frankfurt-A" in message and "نودهای Frankfurt-01" in message and "🟢" in message
-    assert [button["callback_data"] for row in markup["inline_keyboard"] for button in row] == [
+    buttons = [button["callback_data"] for row in markup["inline_keyboard"] for button in row]
+    assert buttons[:4] == [
         f"node|{bot_panel}|1|reconnect", f"node|{bot_panel}|1|disable",
         f"node|{bot_panel}|1|reset", f"node|{bot_panel}|1|status"]
+    assert buttons[4:] == ["section|servers"]
     assert session.scalar(text("SELECT count(*) FROM audit_logs WHERE action='panel.nodes.read'")) == 1
 
 

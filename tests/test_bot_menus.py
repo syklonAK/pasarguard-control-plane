@@ -27,6 +27,11 @@ def staff(session, make_org, make_actor, role, telegram_id):
     return org
 
 
+def menu_labels(role):
+    """Flattened button texts; str(markup) would hide the zero-width joiner inside labels."""
+    return [button["text"] for row in telegram_consumer.menu_for(role)["keyboard"] for button in row]
+
+
 def test_menu_only_offers_sections_the_role_may_open():
     for role in rbac.ROLES:
         for name in telegram_consumer.sections_for(role):
@@ -66,11 +71,24 @@ def test_every_section_permission_is_a_real_permission():
 
 
 def test_support_and_viewer_roles_get_a_smaller_menu_than_admin():
-    assert "💰 درخواست‌های مالی" not in str(telegram_consumer.menu_for("viewer"))
-    assert "🖥 سرورها" not in str(telegram_consumer.menu_for("support"))
-    assert "⚙️ مدیریت سیستم" in str(telegram_consumer.menu_for("system_admin"))
+    assert "💴 درخواست‌های مالی" not in menu_labels("viewer")
+    assert "🖥 سرورها" not in menu_labels("support")
+    assert "⚙️ مدیریت سیستم" in menu_labels("system_admin")
     admin = set(telegram_consumer.sections_for("system_admin"))
     assert set(telegram_consumer.sections_for("operator")) < admin
+
+
+def test_the_customer_and_staff_keyboards_never_mix():
+    staff_only = set(telegram_consumer.TOP[telegram_consumer.STAFF]) - set(telegram_consumer.TOP[telegram_consumer.CUSTOMER])
+    customer_only = set(telegram_consumer.TOP[telegram_consumer.CUSTOMER]) - set(telegram_consumer.TOP[telegram_consumer.STAFF])
+    for role in rbac.ROLES:
+        offered = set(telegram_consumer.top_for(role))
+        if telegram_consumer.audience_for(role) == "customer":
+            assert not offered & staff_only, (role, offered)
+            assert offered & customer_only, "a customer menu with customer sections would be no menu at all"
+        else:
+            assert not offered & customer_only, (role, offered)
+    assert set(telegram_consumer.top_for("system_admin")) == staff_only | {"support"}
 
 
 def test_root_account_is_promoted_even_with_a_viewer_membership(session, workspace, make_org, make_actor):

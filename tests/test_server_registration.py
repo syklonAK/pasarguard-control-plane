@@ -152,7 +152,7 @@ def test_panel_listing_and_nodes_never_expose_secret_columns(client, session, fa
     _register(client)
     listed = client.get("/v1/webapp/panels", headers=as_user(ROOT_ID)).json()
     assert listed[0]["base_url"] == "https://panel.example.test"
-    assert set(listed[0]) == {"id", "name", "base_url", "status"}
+    assert set(listed[0]) == {"id", "name", "base_url", "status", "saleable"}
     nodes = client.get(f"/v1/webapp/panels/{listed[0]['id']}/nodes", headers=as_user(ROOT_ID)).json()
     assert nodes["nodes"] == [{"id": 1, "name": "Germany-01"}]
     assert API_KEY not in json.dumps(listed) + json.dumps(nodes)

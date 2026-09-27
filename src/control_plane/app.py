@@ -78,6 +78,8 @@ class Panel(Base):
     api_key_ref:Mapped[str|None]=mapped_column(Text); owner_user_ref:Mapped[str|None]=mapped_column(Text); owner_pass_ref:Mapped[str|None]=mapped_column(Text)
     usage_coefficient:Mapped[Decimal]=mapped_column(Numeric(10,4),default=Decimal("1"),server_default="1.0000")
     verify_tls:Mapped[bool]=mapped_column(Boolean,default=True,server_default="true"); status:Mapped[str]=mapped_column(String(24),default="active",server_default="active")
+    # Off by default: a server only appears in the customer order list once the owner puts it there.
+    saleable:Mapped[bool]=mapped_column(Boolean,default=False,server_default="false")
     created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
 class PanelOwner(Base):
     __tablename__="panel_owners"
@@ -132,6 +134,35 @@ class FundingRequest(Base):
     amount_irr:Mapped[int]=mapped_column(BigInteger)
     status:Mapped[str]=mapped_column(String(24),default="pending",server_default="pending",index=True)
     decided_by:Mapped[str|None]=mapped_column(String(36)); decided_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
+ORDER_STATES=("pending","quoted","confirmed","payment_declared","approved","rejected","cancelled")
+class PanelOrder(Base):
+    """A Telegram account's request to become a customer, from first touch to a paid account.
+
+    Nothing is created for the requester before an admin quotes the order, so the funnel cannot
+    mint organizations out of chat traffic.
+    """
+    __tablename__="panel_orders"
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    actor_id:Mapped[str]=mapped_column(ForeignKey("actors.id"),index=True)
+    panel_id:Mapped[str]=mapped_column(ForeignKey("panels.id"),index=True)
+    business_name:Mapped[str]=mapped_column(String(160)); slug:Mapped[str]=mapped_column(String(80),unique=True)
+    user_count:Mapped[int]=mapped_column(Integer); daily_gib:Mapped[int]=mapped_column(Integer)
+    note:Mapped[str]=mapped_column(String(500),default="",server_default="")
+    status:Mapped[str]=mapped_column(String(24),default="pending",server_default="pending",index=True)
+    # Filled by the reviewing admin: how much credit the account may run on, and what a GiB costs.
+    credit_limit_irr:Mapped[int]=mapped_column(BigInteger,default=0,server_default="0")
+    price_per_gib_irr:Mapped[int]=mapped_column(BigInteger,default=0,server_default="0")
+    # What the customer was quoted and paid offline; it becomes the opening wallet balance.
+    amount_irr:Mapped[int]=mapped_column(BigInteger,default=0,server_default="0")
+    payment_instructions:Mapped[str]=mapped_column(Text,default="",server_default="")
+    # Only the requested login name crosses into the panel; the password never comes from the chat.
+    admin_username:Mapped[str]=mapped_column(String(80),default="",server_default="")
+    # A panel admin id supplied by the reviewer at quote time turns the order into a billed binding.
+    pg_admin_id:Mapped[int|None]=mapped_column(Integer)
+    organization_id:Mapped[str|None]=mapped_column(ForeignKey("organizations.id"),index=True)
+    decided_by:Mapped[str|None]=mapped_column(String(36)); decided_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    rejection_reason:Mapped[str]=mapped_column(String(500),default="",server_default="")
     created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now())
 class SystemSetting(Base):
     __tablename__="system_settings"

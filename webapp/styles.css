@@ -8,3 +8,16 @@ sheet select:focus,sheet textarea:focus{border-color:var(--primary);box-shadow:0
 sheet textarea{resize:vertical;min-height:84px}
 sheet label.check{display:flex;align-items:center;gap:9px;font-size:12px;color:#dbe7f5}
 sheet label.check input{width:auto;margin:0;padding:0;accent-color:var(--primary);flex:0 0 auto}
+
+/* Customer and order surfaces */
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.state-flow{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.state{padding:5px 9px;border:1px solid var(--line);border-radius:20px;font-size:10px;color:var(--muted);background:rgba(255,255,255,.03)}
+.state.on{border-color:rgba(119,105,255,.5);color:#cfd0ff;background:rgba(119,105,255,.14)}
+.quote-box{display:block;margin-top:8px;padding:10px 12px;border:1px dashed var(--line);border-radius:12px;background:rgba(54,205,232,.06);color:#cfe6f5;font-size:11px;line-height:1.8;white-space:pre-wrap}
+.quote-box.bad{border-color:rgba(255,103,129,.4);background:rgba(255,103,129,.08);color:#ffd8e0}
+.badge.on{background:rgba(119,105,255,.16);color:#cfd0ff}
+.data-card{flex-wrap:wrap}
+.card-actions{flex-wrap:wrap}
+.data-card p{line-height:1.9}
+.bottom-nav{grid-template-columns:repeat(auto-fit,minmax(0,1fr))}

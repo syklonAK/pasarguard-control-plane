@@ -6,7 +6,7 @@ from ``/v1/webapp/capabilities``; neither one is allowed to decide access on its
 """
 from __future__ import annotations
 
-ROLES = ("system_admin", "reseller_admin", "operator", "finance", "support", "viewer")
+ROLES = ("system_admin", "reseller_admin", "operator", "finance", "support", "viewer", "customer")
 
 # Assignable roles are every role except the root administrator identity, which is derived
 # from ROOT_TELEGRAM_ID and can never be granted through an API payload.
@@ -23,20 +23,28 @@ NETWORK = {"manage_resellers"}
 # The usage coefficient turns panel bytes into money for the bound organization, so letting
 # the account that is billed change it would be self-service pricing. Reserved for the root.
 PRICING = {"change_billing_coefficient"}
+# A customer is not staff: they buy a panel, they do not operate one. The whole surface is an
+# order plus the subscribers on the server that order eventually binds them to.
+ORDER = {"order_panel"}
+ORDER_DECIDE = {"decide_orders"}
+CUSTOMER = {"view_dashboard", "view_finance", "export_reports", "create_support_ticket",
+            "request_funding", "subscriber_control"} | ORDER
 
 # Correcting a settled balance is the one money operation that is never delegated: the
 # requester and the approver must be two different people, and only the system
 # administrator is allowed to approve.
 MATRIX: dict[str, set[str]] = {
-    "system_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | {"decide_adjustment"},
-    "reseller_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK,
+    "system_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | ORDER | ORDER_DECIDE | {"decide_adjustment"},
+    "reseller_admin": VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | ORDER | ORDER_DECIDE,
     "operator": {"view_dashboard", "view_audit", "export_reports", "manage_servers", "node_control", "subscriber_control", "admin_limit"},
     "finance": {"view_dashboard", "view_finance", "view_audit", "export_reports", "create_support_ticket"} | MONEY_REQUEST | MONEY_DECIDE,
     "support": {"view_dashboard", "view_finance", "create_support_ticket", "answer_support", "subscriber_control"},
     "viewer": {"view_dashboard", "view_finance", "export_reports"},
+    "customer": CUSTOMER,
 }
 
-ALL_PERMISSIONS = sorted(VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | {"decide_adjustment"})
+ALL_PERMISSIONS = sorted(VIEW | MONEY_REQUEST | MONEY_DECIDE | INFRA | NETWORK | PRICING | ORDER | ORDER_DECIDE
+                         | {"decide_adjustment"})
 
 LABELS_FA = {
     "view_dashboard": "مشاهدهٔ داشبورد",
@@ -55,6 +63,8 @@ LABELS_FA = {
     "admin_limit": "تغییر سقف پنل",
     "change_billing_coefficient": "تغییر ضریب صورتحساب",
     "manage_resellers": "مدیریت نمایندگان",
+    "order_panel": "ثبت و پیگیری سفارش پنل",
+    "decide_orders": "بررسی و تأیید سفارش پنل",
 }
 
 
@@ -87,4 +97,5 @@ def role_fa(role: str | None) -> str:
         "finance": "مدیر مالی",
         "support": "پشتیبان",
         "viewer": "مشاهده‌گر",
+        "customer": "مشتری (فروشنده)",
     }.get(normalize(role), str(role or "کاربر"))
